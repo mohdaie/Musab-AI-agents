@@ -159,23 +159,51 @@ export async function createTeam({ name, style, agents }) {
   if (!style) throw new Error("Pick a kind of team");
   if (!Array.isArray(agents) || agents.length < 1 || agents.length > MAX_AGENTS) throw new Error(`A team needs 1 to ${MAX_AGENTS} agents`);
   const seen = new Set();
-  const list = agents.map((a, i) => {
-    const role = String(a.role || "").trim().slice(0, 120);
-    const persona = String(a.about || "").trim().slice(0, 2000);
-    let n = slug(a.name || "", 32).replace(/-/g, "_") || `agent${i + 1}`;
-    if (!/^[a-z]/.test(n)) n = `a${n}`.slice(0, 32);
-    if (!role) throw new Error(`Agent #${i + 1} needs a designation`);
-    if (!NAME_RE.test(n) || RESERVED.has(n)) throw new Error(`Agent #${i + 1}: '${n}' can't be used as a name`);
-    if (seen.has(n)) throw new Error(`Two agents are called '${n}'`);
-    seen.add(n);
-    return { name: n, role, persona, skills: style === "work" ? ["critical-review"] : [], thinking: style === "work" ? "high" : "low" };
-  });
+  const list = agents.map((a, i) => makeAgent(a, i, style, seen));
   const existing = new Set((await db.teams()).map((t) => t.id));
   const base = slug(name, 32) || "team";
   let id = base, k = 2;
   while (existing.has(id)) id = `${base}-${k++}`;
   const team = { id, name, style, agents: list, created_at: Date.now() / 1000 };
   await db.saveTeam(team);
+  return team;
+}
+
+/** Validate one member. `seen` holds the names already taken in the team. */
+function makeAgent(a, i, style, seen) {
+  const role = String(a.role || "").trim().slice(0, 120);
+  const persona = String(a.about || "").trim().slice(0, 2000);
+  let n = slug(a.name || "", 32).replace(/-/g, "_") || `agent${i + 1}`;
+  if (!/^[a-z]/.test(n)) n = `a${n}`.slice(0, 32);
+  if (!role) throw new Error(`Agent #${i + 1} needs a designation`);
+  if (!NAME_RE.test(n) || RESERVED.has(n)) throw new Error(`'${n}' can't be used as a name`);
+  if (seen.has(n)) throw new Error(`Someone in the team is already called '${n}'`);
+  seen.add(n);
+  return { name: n, role, persona, skills: style === "work" ? ["critical-review"] : [], thinking: style === "work" ? "high" : "low" };
+}
+
+export async function addMember(teamId, a) {
+  const team = await db.team(teamId);
+  if (!team) throw new Error("Team not found");
+  if (team.agents.length >= MAX_AGENTS) throw new Error(`A team can have up to ${MAX_AGENTS} members`);
+  const agent = makeAgent(a, team.agents.length, team.style, new Set(team.agents.map((x) => x.name)));
+  team.agents.push(agent);
+  await db.saveTeam(team);
+  await db.post(team.id, "system", ["user"], `@${agent.name} (${agent.role}) joined the ${team.style === "friends" ? "group" : "team"}.`);
+  return team;
+}
+
+/** Remove a member and their private memory. Their old messages stay in the chat. */
+export async function removeMember(teamId, name) {
+  const team = await db.team(teamId);
+  if (!team) throw new Error("Team not found");
+  if (team.agents.length <= 1) throw new Error("A team needs at least one member. Delete the team instead.");
+  const agent = team.agents.find((a) => a.name === name);
+  if (!agent) throw new Error(`No one called @${name} in this team`);
+  team.agents = team.agents.filter((a) => a.name !== name);
+  await db.saveTeam(team);
+  await db.deleteMemories(team.id, name);
+  await db.post(team.id, "system", ["user"], `@${name} left the ${team.style === "friends" ? "group" : "team"}.`);
   return team;
 }
 

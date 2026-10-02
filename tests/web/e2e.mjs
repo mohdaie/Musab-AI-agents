@@ -162,6 +162,36 @@ try {
   await page.waitForSelector("text=API keys");
   check(true, "new login works");
 
+  // manage the team: add a member, remove one, clear the chat, delete the team
+  await page.goto(APP + "#/team/the-squad");
+  await page.waitForSelector("text=Ramen at Jalan Alor");
+  await page.click("[aria-label='Team info']");
+  await page.click("text=Add a friend");
+  await page.fill("#add-name", "Nina"); await page.fill("#add-role", "The artist"); await page.fill("#add-about", "Draws everything.");
+  await page.click(".add-member button[type=submit]");
+  await page.waitForSelector(".member-chip:has-text('nina')");
+  check((await text()).includes("@nina (The artist) joined the group."), "member added, chip and notice shown");
+  await page.waitForSelector("dialog[open] .sub:has-text('4 members')");
+  check(true, "sheet reopens with 4 members");
+  await shot("06-team-sheet");
+  await page.click("[aria-label='Remove danny']");
+  await page.waitForSelector("text=@danny left the group.");
+  check(await page.locator(".member-chip:has-text('danny')").count() === 0, "member removed from the chat");
+  await page.click(".sheet-body .close-sheet");
+  calls.length = 0;
+  await page.fill("textarea", "@nina hi!");
+  await page.click("button.send");
+  for (let i = 0; i < 100 && !calls.some((c) => c.name === "nina"); i++) await page.waitForTimeout(100);
+  check(calls.some((c) => c.name === "nina") && calls[0].body.messages[0].content.includes("@jess"), "new member answers and knows the group");
+  await page.click("[aria-label='Team info']");
+  await page.click(".sheet-body button:has-text('Clear chat')");
+  await page.waitForSelector("text=Say hi to the group");
+  check(!(await text()).includes("Ramen at Jalan Alor"), "chat cleared, team kept");
+  await page.click("[aria-label='Team info']");
+  await page.click(".sheet-body button:has-text('Delete team')");
+  await page.waitForSelector(".hero");
+  check(true, "team deleted");
+
   // dark mode screenshot of admin
   if (SHOTS) {
     await page.emulateMedia({ colorScheme: "dark" });
