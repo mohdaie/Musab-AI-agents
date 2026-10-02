@@ -105,6 +105,52 @@ const webSection = (agent) => (canBrowse(agent) ? `
 You can search the web (web_search) and read a page (read_page). Use them only when you need current or exact facts
 you aren't sure of, at most ${MAX_WEB_CALLS} times per reply. Say where information came from (site name or link).
 ` : "");
+// Only for members with "Can use Threads" on, when a Threads account is connected in Admin.
+// Agents never post: threads_draft shows the draft in the chat, and the person taps Post.
+const THREADS_TOOLS = [
+  { type: "function", function: {
+    name: "threads_search",
+    description: "Search public Threads posts by keyword or topic tag. Returns up to 15 posts with author, date, text and link.",
+    parameters: { type: "object", properties: {
+      query: { type: "string", description: "Keywords, or a topic tag without # when tag=true" },
+      recent: { type: "boolean", description: "true = newest first; false (default) = most popular" },
+      tag: { type: "boolean", description: "true = search a topic tag instead of keywords" } }, required: ["query"] } } },
+  { type: "function", function: {
+    name: "threads_draft",
+    description: "Show a finished Threads post (or a thread of several posts) to the user, with a button to post it. One item per post, each at most 500 characters. You can't post yourself.",
+    parameters: { type: "object", properties: {
+      posts: { type: "array", items: { type: "string" }, description: "The post, or each post of a thread in order" } }, required: ["posts"] } } },
+];
+const MAX_THREADS_SEARCHES = 3; // per reply
+export const THREADS_MAX_CHARS = 500, THREADS_MAX_POSTS = 10;
+/** Length as Threads counts it: one per character, but an emoji counts its UTF-8 bytes (same as the server). */
+export function threadsLength(s) {
+  const seg = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  let n = 0;
+  for (const { segment } of seg.segment(String(s))) {
+    n += /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(segment) ? new TextEncoder().encode(segment).length : 1;
+  }
+  return n;
+}
+/** Problems with a draft, or "" when it can be posted. */
+export function draftProblem(posts) {
+  if (!posts.length) return "Nothing to post.";
+  if (posts.length > THREADS_MAX_POSTS) return `A thread can have up to ${THREADS_MAX_POSTS} posts here.`;
+  for (const [i, p] of posts.entries()) {
+    if (!p.trim()) return `Post ${i + 1} is empty.`;
+    const n = threadsLength(p.trim());
+    if (n > THREADS_MAX_CHARS) return `Post ${i + 1} is ${n} characters; Threads allows ${THREADS_MAX_CHARS}.`;
+  }
+  return "";
+}
+const canThreads = (agent) => !!agent.threads && !!session.settings().threads;
+const threadsSection = (agent) => (canThreads(agent) ? `
+## Threads
+You can search public Threads posts (threads_search, at most ${MAX_THREADS_SEARCHES} times per reply) to see what people post and
+how they word it; cite the links. When you have a finished post for Threads, call threads_draft with each post as one item
+(max ${THREADS_MAX_CHARS} characters each). The user reviews it and taps Post; you never post yourself. After threads_draft,
+don't repeat the draft in your answer: one short line is enough.
+` : "");
 const agentSkills = (agent) => (agent.skillIds || []).map((id) => skills.byId(id)).filter(Boolean);
 function skillsSection(agent) {
   const list = agentSkills(agent);
@@ -173,6 +219,26 @@ export async function setAgentWeb(teamId, name, on) {
   agent.web = !!on;
   await db.saveTeam(team);
   return team;
+}
+
+/** Turn Threads (search and drafts) on or off for one member. */
+export async function setAgentThreads(teamId, name, on) {
+  const team = await db.team(teamId);
+  const agent = team?.agents.find((a) => a.name === name);
+  if (!agent) throw new Error(`No one called @${name} in this team`);
+  agent.threads = !!on;
+  await db.saveTeam(team);
+  return team;
+}
+
+/** Post a draft from the chat to Threads (the person tapped Post). Saves the result on the message. */
+export async function postDraft(msg, posts) {
+  const problem = draftProblem(posts);
+  if (problem) throw new Error(problem);
+  const r = await api("/threads/publish", { method: "POST", body: { posts: posts.map((p) => p.trim()), meta: { team: msg.team, agent: msg.sender } } });
+  const draft = { ...msg.threadsDraft, posts, postedAt: Date.now(), permalink: r.permalink || "", postedCount: r.ids.length, error: r.error || "" };
+  await db.updateMessage(msg.id, { threadsDraft: draft });
+  return draft;
 }
 
 /** Choose which skills (from Admin → Skills) one member has. */
@@ -268,7 +334,7 @@ The human friend is "user".
 - You can see the recent group chat; use it when someone asks what was said.
 - Don't repeat what someone else already said. If you have nothing to add, answer exactly PASS (nothing is posted).
 
-${skillsSection(agent)}${webSection(agent)}
+${skillsSection(agent)}${webSection(agent)}${threadsSection(agent)}
 ## Length
 ${talk(agent).style}
 
@@ -297,7 +363,7 @@ The human is "user".
 ## Your skills
 ${skills}
 
-${skillsSection(agent)}${webSection(agent)}
+${skillsSection(agent)}${webSection(agent)}${threadsSection(agent)}
 ## Length
 ${talk(agent).style}
 
@@ -384,9 +450,9 @@ export class Engine extends EventTarget {
       ];
       let reply = "";
       let step = 0;
-      const budget = { web: MAX_WEB_CALLS };
+      const budget = { web: MAX_WEB_CALLS, threads: MAX_THREADS_SEARCHES };
       for (; step < MAX_TOOL_STEPS; step++) {
-        const tools = [...TOOLS, ...(agentSkills(agent).length ? [USE_SKILL] : []), ...(canBrowse(agent) ? WEB_TOOLS : [])];
+        const tools = [...TOOLS, ...(agentSkills(agent).length ? [USE_SKILL] : []), ...(canBrowse(agent) ? WEB_TOOLS : []), ...(canThreads(agent) ? THREADS_TOOLS : [])];
         const out = await this.chat({ model, messages, tools, thinking: thinking ?? agent.thinking, maxTokens,
           meta: { team: team.id, agent: agent.name } });
         messages.push(out);
@@ -416,7 +482,30 @@ export class Engine extends EventTarget {
     }
   }
 
-  async runTool(team, agent, name, args, msg, roster, budget = { web: MAX_WEB_CALLS }) {
+  async runTool(team, agent, name, args, msg, roster, budget = { web: MAX_WEB_CALLS, threads: MAX_THREADS_SEARCHES }) {
+    if (name === "threads_search") {
+      if (!canThreads(agent)) return "Threads is off for you.";
+      if (budget.threads-- <= 0) return `Threads search limit reached for this reply (${MAX_THREADS_SEARCHES}). Answer with what you have.`;
+      const q = String(args.query || "").trim();
+      await db.post(team.id, "system", ["user"], `🧵 ${agent.name} searched Threads: “${(args.tag ? "#" : "") + q.slice(0, 120)}”`, msg);
+      this.changed(team.id);
+      const r = await api("/threads/search", { method: "POST", body: { query: q, recent: !!args.recent, tag: !!args.tag, meta: { team: team.id, agent: agent.name } } });
+      const list = r.results.map((p, i) => `${i + 1}. @${p.username} (${p.timestamp.slice(0, 10)})\n${p.text}\n${p.permalink}`).join("\n\n") || "No posts found.";
+      return list + (r.ownOnly ? "\n\n(Note: Meta hasn't approved public search for this app yet, so Threads search only covers the user's own posts. " +
+        "Say so if it matters, and use web search for public posts if you have it.)" : "");
+    }
+    if (name === "threads_draft") {
+      if (!canThreads(agent)) return "Threads is off for you.";
+      let posts = args.posts;
+      if (typeof posts === "string") posts = [posts];
+      posts = (Array.isArray(posts) ? posts : []).map((p) => String(p ?? "").trim()).filter(Boolean);
+      const problem = draftProblem(posts);
+      if (problem) return `Draft not shown: ${problem} Fix it and call threads_draft again.`;
+      const content = `Threads draft:\n\n${posts.join("\n\n---\n\n")}`;
+      await db.post(team.id, agent.name, ["user"], content, msg, { threadsDraft: { posts } });
+      this.changed(team.id);
+      return "The draft is in the chat with a Post to Threads button. The user decides whether to post it.";
+    }
     if (name === "web_search" || name === "read_page") {
       if (!canBrowse(agent)) return "Web access is off for you.";
       if (budget.web-- <= 0) return `Web limit reached for this reply (${MAX_WEB_CALLS}). Answer with what you have.`;

@@ -80,7 +80,13 @@ async function dashboard(go, current, setCleanup) {
   }
   if (!current()) return;
   session.set(session.token(), state.mustChange);
-  session.cacheSettings({ ...state.settings, webSearch: !!state.webSearch });
+  session.cacheSettings({ ...state.settings, webSearch: !!state.webSearch, threads: !!state.threads?.connected, threadsUser: state.threads?.username || "" });
+  // Back from the Threads sign-in page: #/admin/threads-ok or #/admin/threads-error:<message>
+  const back = location.hash.match(/^#\/admin\/threads-(ok|error:(.*))$/);
+  if (back) {
+    history.replaceState(null, "", "#/admin");
+    toast(back[1] === "ok" ? `Threads connected${state.threads?.username ? ` as @${state.threads.username}` : ""}` : `Threads: ${decodeURIComponent(back[2] || "couldn't connect")}`);
+  }
   const reload = () => { if (current()) dashboard(go, current, setCleanup); };
   const signOut = h("button", { class: "icon-btn", "aria-label": "Sign out", title: "Sign out", html: icon("logout"),
     onclick: () => { session.signOut(); go("#/"); toast("Signed out on this device"); } });
@@ -94,9 +100,10 @@ async function dashboard(go, current, setCleanup) {
   const usageCard = h("section", { class: "card" });
   const skillsCard = h("section", { class: "card", id: "skills" });
   const webCard = webSearchCard(state, reload);
+  const threadsCard = threadsAdminCard(state.threads || {}, reload);
   $app.replaceChildren(screen(bar,
     localKeysCard(reload),
-    keysCard, skillsCard, webCard, usageCard, settingsCard(state.settings),
+    keysCard, skillsCard, webCard, threadsCard, usageCard, settingsCard(state.settings),
     loginCard(false, state.username, reload),
     h("p", { class: "note" }, "Keys are stored on your server (Supabase) and only the server talks to DeepSeek, so keys never reach a phone. " +
       "Settings and usage are the same on every device you sign in on.")));
@@ -227,6 +234,81 @@ function webSearchCard(state, reload) {
       } }, "Remove key") : null),
     h("p", { class: "muted small" }, "Then in a chat: tap the group name and switch on ", h("strong", {}, "Can browse the web"),
       " for the agents who need it. Each agent can do at most 3 searches or page reads per reply. Every search shows in the chat, and Usage counts them."));
+}
+
+// ------------------------------------------------------------------ threads
+function threadsAdminCard(t, reload) {
+  const card = h("section", { class: "card", id: "threads" });
+  const pillText = t.connected ? "Connected" : t.configured ? "Not connected" : "Off";
+  const head = h("div", { class: "card-head" }, h("h2", {}, "Threads"), h("span", { class: `pill ${t.connected ? "ok" : ""}` }, pillText));
+  const intro = h("p", { class: "muted small" }, "Lets agents you choose search Threads and draft posts. Agents never post by themselves: a draft shows in the chat with a ",
+    h("strong", {}, "Post to Threads"), " button, and nothing goes out until you tap it. Free; uses your own Meta app.");
+  const copy = (text) => h("button", { type: "button", class: "btn small", onclick: async () => {
+    try { await navigator.clipboard.writeText(text); toast("Copied"); } catch { toast("Copy failed. Select the text instead."); }
+  } }, "Copy");
+
+  if (t.connected) {
+    const days = t.expiresAt ? Math.max(0, Math.round((t.expiresAt - Date.now()) / 864e5)) : 0;
+    card.append(head, intro,
+      h("div", { class: "threads-account" }, h("strong", {}, `@${t.username || "your account"}`),
+        h("small", { class: "muted" }, days ? `Sign-in valid for ${days} more day${days === 1 ? "" : "s"}; it renews itself while agents use it.` : "")),
+      h("p", { class: "muted small" }, "Public search needs Meta to approve the ", h("code", {}, "threads_keyword_search"),
+        " permission for your app (App Review). Until then, Threads search only finds your own posts. Posting works now."),
+      h("div", { class: "footer-actions" },
+        h("button", { type: "button", class: "btn small danger", onclick: async () => {
+          if (!confirm("Disconnect Threads? Agents can't search Threads, and drafts can't be posted until you connect again.")) return;
+          try { await api("/threads/disconnect", { method: "POST", body: {} }); toast("Threads disconnected"); reload(); } catch (e) { toast(e.message); }
+        } }, "Disconnect")),
+      h("p", { class: "muted small" }, "Then in a chat: tap the group name and switch on ", h("strong", {}, "Can use Threads"), " for the agents who need it."));
+    return card;
+  }
+
+  const connect = h("button", { type: "button", class: "btn primary block", disabled: !t.configured, onclick: async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      const r = await api("/threads/start", { method: "POST", body: { ret: location.href.split("#")[0] } });
+      location.href = r.url;
+    } catch (ex) { toast(ex.message); e.currentTarget.disabled = false; }
+  } }, "Connect Threads account");
+
+  const appId = h("input", { class: "input mono", id: "threads-app-id", inputmode: "numeric", autocomplete: "off", value: t.appId || "", placeholder: "e.g. 1234567890123456" });
+  const secret = h("input", { class: "input mono", id: "threads-secret", type: "password", autocomplete: "off", spellcheck: "false",
+    placeholder: t.configured ? "Saved. Paste again to change" : "Threads app secret" });
+  const err = h("p", { class: "error", hidden: true });
+  const save = h("button", { class: "btn", type: "submit" }, "Save");
+  const steps = h("details", { class: "setup-steps", open: !t.configured },
+    h("summary", {}, "How to set it up (about 10 minutes, once)"),
+    h("ol", {},
+      h("li", {}, "Go to ", h("a", { href: "https://developers.facebook.com/apps", target: "_blank", rel: "noopener" }, "developers.facebook.com/apps"),
+        " → ", h("strong", {}, "Create app"), " → choose the use case ", h("strong", {}, "Access the Threads API"), "."),
+      h("li", {}, "In ", h("strong", {}, "Use cases → Customize"), ", add the permissions ", h("code", {}, "threads_content_publish"), " and ",
+        h("code", {}, "threads_keyword_search"), "."),
+      h("li", {}, "In ", h("strong", {}, "Settings"), ", paste this into ", h("strong", {}, "Redirect callback URLs"), " (and the uninstall and delete callback boxes), then Save:",
+        h("div", { class: "copy-row" }, h("code", { class: "mono" }, t.redirectUri || ""), copy(t.redirectUri || ""))),
+      h("li", {}, "In ", h("strong", {}, "App roles → Roles"), ", add your Threads username as a ", h("strong", {}, "Threads Tester"),
+        ". Then in the Threads app: Settings → Account → Website permissions → Invites → Accept."),
+      h("li", {}, "Copy the ", h("strong", {}, "Threads app ID"), " and ", h("strong", {}, "Threads app secret"), " from the same Settings page into the boxes below, Save, then tap ",
+        h("strong", {}, "Connect Threads account"), ".")));
+  card.append(head, intro, steps,
+    h("form", { onsubmit: async (e) => {
+      e.preventDefault();
+      err.hidden = true; save.disabled = true;
+      try {
+        await api("/threads/app", { method: "POST", body: { appId: appId.value.trim(), appSecret: secret.value.trim() } });
+        toast("Saved. Now connect your Threads account."); reload();
+      } catch (ex) { err.textContent = ex.message; err.hidden = false; save.disabled = false; }
+    } },
+      h("div", { class: "field" }, h("label", { for: "threads-app-id" }, "Threads app ID"), appId),
+      h("div", { class: "field" }, h("label", { for: "threads-secret" }, "Threads app secret"), secret),
+      err,
+      h("div", { class: "footer-actions" },
+        t.configured ? h("button", { type: "button", class: "link-btn small danger-text", onclick: async () => {
+          if (!confirm("Remove the Threads app details?")) return;
+          try { await api("/threads/app", { method: "POST", body: {} }); toast("Threads removed"); reload(); } catch (ex) { toast(ex.message); }
+        } }, "Remove") : null,
+        save)),
+    connect);
+  return card;
 }
 
 // ------------------------------------------------------------------ skills
@@ -396,7 +478,7 @@ async function renderUsage(card, state) {
     dailyChart(all),
     rows.length ? null : h("p", { class: "muted" }, "No requests in this period yet."),
     table("By API key", groupBy(rows, "keyId"), (k) => keys[k] || "Removed key", true),
-    table("By model", groupBy(rows, "model"), (k) => ({ "web-search": "Web searches", "web-read": "Pages read" }[k] || (MODELS[k] || k).replace(/ \(.*\)$/, "")), false),
+    table("By model", groupBy(rows, "model"), (k) => ({ "web-search": "Web searches", "web-read": "Pages read", "threads-search": "Threads searches", "threads-post": "Threads posts" }[k] || (MODELS[k] || k).replace(/ \(.*\)$/, "")), false),
     table("By agent", groupBy(rows, "agent"), (k) => (k ? `@${k}` : "Other"), false),
     h("p", { class: "muted small" }, "Counted by the server for every device. Cost is estimated from DeepSeek's published prices, including peak and off-peak rates; your real balance is shown on each key."),
     h("button", { class: "link-btn small", onclick: async () => {
@@ -445,7 +527,8 @@ function settingsCard(s) {
     try {
       const next = await api("/settings", { method: "POST", body: patch });
       Object.assign(s, next);
-      session.cacheSettings({ ...next, webSearch: session.settings().webSearch }); // not part of /settings
+      const { webSearch, threads, threadsUser } = session.settings(); // not part of /settings
+      session.cacheSettings({ ...next, webSearch, threads, threadsUser });
       toast("Saved");
     }
     catch (e) { toast(e.message); }

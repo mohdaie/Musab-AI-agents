@@ -3,7 +3,8 @@
    usage are on the server, which also relays the agents' DeepSeek requests (server.js). */
 import { adminView } from "./admin.js";
 import { db } from "./db.js";
-import { Engine, TALK, TALK_LEVELS, addMember, createTeam, removeMember, setAgentSkills, setAgentTalk, setAgentWeb } from "./engine.js";
+import { Engine, TALK, TALK_LEVELS, THREADS_MAX_CHARS, addMember, createTeam, draftProblem, postDraft, removeMember,
+  setAgentSkills, setAgentTalk, setAgentThreads, setAgentWeb, threadsLength } from "./engine.js";
 import { session, skills, syncSettings, syncSkills } from "./server.js";
 import { $app, $banner, $sheet, appbar, avatar, colorFor, fmtTime, groupAvatar, h, icon, richText, toast } from "./ui.js";
 
@@ -148,6 +149,90 @@ function webToggle(team, a) {
         try { await setAgentWeb(team.id, a.name, e.target.checked); a.web = e.target.checked; toast(`@${a.name}: web ${a.web ? "on" : "off"}`); }
         catch (ex) { e.target.checked = !e.target.checked; toast(ex.message); }
       } }));
+}
+
+/** "Can use Threads" switch for one member (needs a Threads account connected in Admin → Threads). */
+function threadsToggle(team, a) {
+  const ready = !!session.settings().threads;
+  return h("label", { class: "switch threads-toggle" },
+    h("span", {}, h("strong", {}, "Can use Threads"),
+      h("span", { class: "hint" }, ready ? "Search Threads posts and draft posts for you to approve." : "Connect Threads in Admin first.")),
+    h("input", { type: "checkbox", checked: !!a.threads, disabled: !ready && !a.threads, "aria-label": `@${a.name} can use Threads`,
+      onchange: async (e) => {
+        try { await setAgentThreads(team.id, a.name, e.target.checked); a.threads = e.target.checked; toast(`@${a.name}: Threads ${a.threads ? "on" : "off"}`); }
+        catch (ex) { e.target.checked = !e.target.checked; toast(ex.message); }
+      } }));
+}
+
+/** A Threads draft from an agent: the posts, then Edit and Post to Threads, or a link once it's posted. */
+function draftCard(m) {
+  const box = h("div", { class: "draft" });
+  let d = m.threadsDraft;
+  const count = (p) => { const n = threadsLength(p); return h("small", { class: `count ${n > THREADS_MAX_CHARS ? "over" : ""}` }, `${n}/${THREADS_MAX_CHARS}`); };
+  const draw = () => {
+    const many = d.posts.length > 1;
+    box.replaceChildren(
+      h("div", { class: "draft-head" }, h("strong", {}, many ? `Threads draft · ${d.posts.length} posts` : "Threads draft")),
+      ...d.posts.map((p, i) => h("div", { class: "draft-post" },
+        many ? h("span", { class: "draft-n" }, `${i + 1}/${d.posts.length}`) : null,
+        h("p", {}, p), count(p))),
+      d.postedAt
+        ? h("div", { class: "draft-done" },
+            d.error ? h("p", { class: "error small" }, d.error) : null,
+            h("span", {}, d.postedCount && d.postedCount < d.posts.length ? `✓ Posted ${d.postedCount} of ${d.posts.length}` : "✓ Posted to Threads"),
+            d.permalink ? h("a", { href: d.permalink, target: "_blank", rel: "noopener" }, "View on Threads") : null)
+        : h("div", { class: "draft-actions" },
+            session.settings().threads ? null : h("small", { class: "muted" }, "Connect Threads in ", h("a", { href: "#/admin" }, "Admin"), " to post."),
+            h("button", { type: "button", class: "btn small", onclick: edit }, "Edit"),
+            h("button", { type: "button", class: "btn small primary", disabled: !session.settings().threads, onclick: post }, "Post to Threads")));
+  };
+  const post = async (e) => {
+    const who = session.settings().threadsUser;
+    const what = d.posts.length > 1 ? `this thread (${d.posts.length} posts)` : "this post";
+    if (!confirm(`Post ${what} to Threads${who ? ` as @${who}` : ""}? Everyone will be able to see it.`)) return;
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.textContent = "Posting…";
+    try {
+      d = await postDraft({ ...m, threadsDraft: d }, d.posts);
+      m.threadsDraft = d; draw();
+      toast(d.error ? "Only part of the thread was posted" : "Posted to Threads");
+    } catch (ex) { toast(ex.message); btn.disabled = false; btn.textContent = "Post to Threads"; }
+  };
+  const edit = () => {
+    const posts = [...d.posts];
+    const err = h("p", { class: "error", hidden: true });
+    const list = h("div", { class: "draft-edit" });
+    const drawEdit = () => list.replaceChildren(...posts.map((p, i) => {
+      const n = count(p);
+      const ta = h("textarea", { class: "textarea", "aria-label": `Post ${i + 1}`, value: p,
+        oninput: (ev) => { posts[i] = ev.target.value; n.replaceWith(count(posts[i])); } });
+      ta.value = p;
+      return h("div", { class: "field" },
+        h("div", { class: "draft-edit-head" }, h("span", { class: "label" }, posts.length > 1 ? `Post ${i + 1}` : "Post"),
+          posts.length > 1 ? h("button", { type: "button", class: "link-btn small danger-text", onclick: () => { posts.splice(i, 1); drawEdit(); } }, "Remove") : null),
+        ta, n);
+    }));
+    drawEdit();
+    $sheet.replaceChildren(h("div", { class: "sheet-body" },
+      h("h2", {}, "Edit Threads draft"),
+      h("p", { class: "sub" }, `Each post up to ${THREADS_MAX_CHARS} characters. More than one post becomes a thread.`),
+      list,
+      h("button", { type: "button", class: "btn block", html: `${icon("plus")} Add a post`, onclick: () => { posts.push(""); drawEdit(); } }),
+      err,
+      h("div", { class: "footer-actions" },
+        h("button", { type: "button", class: "btn", onclick: () => $sheet.close() }, "Cancel"),
+        h("button", { type: "button", class: "btn primary", onclick: async () => {
+          const clean = posts.map((p) => p.trim()).filter(Boolean);
+          const problem = draftProblem(clean);
+          if (problem) { err.textContent = problem; err.hidden = false; return; }
+          d = { ...d, posts: clean };
+          await db.updateMessage(m.id, { threadsDraft: d });
+          m.threadsDraft = d; draw(); $sheet.close(); toast("Draft saved");
+        } }, "Save"))));
+    if (!$sheet.open) $sheet.showModal();
+  };
+  draw();
+  return box;
 }
 
 const defaultLevel = () => (TALK[session.settings().talk] ? session.settings().talk : "balanced");
@@ -409,7 +494,7 @@ async function chatView(id, current) {
       list.append(h("div", { class: `msg ${mine ? "mine" : ""} ${grouped ? "cont" : "first"}` },
         mine ? null : h("span", { class: "avatar-slot" }, grouped ? null : avatar(m.sender)),
         h("div", { class: "bubble" }, who,
-          h("div", { class: "text", html: richText(m.content, names) }),
+          m.threadsDraft ? draftCard(m) : h("div", { class: "text", html: richText(m.content, names) }),
           h("span", { class: "meta" },
             h("time", { datetime: new Date(m.created_at * 1000).toISOString() }, clock(m.created_at)),
             mine ? h("span", { class: "ticks", "aria-label": "Sent", html: icon("check2") }) : null))));
@@ -510,7 +595,8 @@ function drawTeamSheet(team) {
           catch (e) { toast(e.message); return false; }
         }, `How much @${a.name} talks`),
         skillsPicker(team, a),
-        webToggle(team, a)),
+        webToggle(team, a),
+        threadsToggle(team, a)),
       h("button", { class: "btn small danger", "aria-label": `Remove ${a.name}`, disabled: team.agents.length <= 1,
         title: team.agents.length <= 1 ? "A team needs at least one member" : "", onclick: async () => {
           if (!confirm(`Remove @${a.name} from “${team.name}”? Their own memory is deleted; their old messages stay in the chat.`)) return;
