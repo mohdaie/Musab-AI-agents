@@ -1,7 +1,7 @@
 /* Admin: sign in, manage DeepSeek API keys, see usage and cost per key, settings.
    Everything is stored in this browser only. */
 import { admin, config, db, DEFAULT_ADMIN } from "./db.js";
-import { MODELS, checkBalance } from "./engine.js";
+import { MODELS, TALK, checkBalance } from "./engine.js";
 import { $app, h, icon, toast } from "./ui.js";
 
 const PERIODS = { today: "Today", d7: "7 days", d30: "30 days", all: "All time" };
@@ -314,20 +314,17 @@ function settingsCard() {
   const save = (patch) => { config.saveSettings(patch); toast("Saved"); };
   const model = h("select", { class: "input", id: "set-model", onchange: (e) => save({ model: e.target.value }) },
     Object.entries(MODELS).map(([id, name]) => h("option", { value: id, selected: id === s.model }, name)));
-  const num = (id, value, min, max, key) => h("input", { class: "input", id, type: "number", inputmode: "numeric", min, max, value,
-    onchange: (e) => {
-      const v = Math.max(min, Math.min(max, Math.round(Number(e.target.value) || value)));
-      e.target.value = v; save({ [key]: v });
-    } });
+  const talkChoice = (key) => h("label", { class: "talk-option" },
+    h("input", { type: "radio", name: "talk", value: key, checked: (s.talk || "balanced") === key,
+      onchange: () => save({ talk: key }) }),
+    h("span", {}, h("strong", {}, TALK[key].label), h("span", { class: "hint" }, TALK[key].desc)));
   return h("section", { class: "card" },
     h("div", { class: "card-head" }, h("h2", {}, "Settings")),
+    h("fieldset", { class: "field talk" }, h("legend", {}, "How much agents talk"),
+      Object.keys(TALK).map(talkChoice),
+      h("span", { class: "hint" }, "The biggest saving. Agents you @mention always answer.")),
     h("div", { class: "field" }, h("label", { for: "set-model" }, "Model for all agents"), model,
       h("span", { class: "hint" }, "Flash costs about a third of Pro. Good for friends chats.")),
-    h("div", { class: "row" },
-      h("div", { class: "field" }, h("label", { for: "set-hops" }, "Agent-to-agent hops"), num("set-hops", s.maxHops, 1, 12, "maxHops"),
-        h("span", { class: "hint" }, "How many times agents can pass a thread between them.")),
-      h("div", { class: "field" }, h("label", { for: "set-replies" }, "Max agent replies per thread"), num("set-replies", s.maxReplies, 3, 60, "maxReplies"),
-        h("span", { class: "hint" }, "Stops long chains from using too many tokens."))),
     h("label", { class: "switch" },
       h("span", {}, h("strong", {}, "Use the next key if one fails"), h("span", { class: "hint" }, "When a key is invalid or out of balance.")),
       h("input", { type: "checkbox", checked: s.fallback, onchange: (e) => save({ fallback: e.target.checked }) })));

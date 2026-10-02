@@ -26,6 +26,39 @@ export function estimateCost(model, u, ms) {
   return (hit * p.hit[i] + miss * p.miss[i] + (u.completion || 0) * p.out[i]) / 1e6;
 }
 
+/* How much the agents talk. This is the main lever on token use:
+   responders = how many agents answer a message sent to everyone (0 = all; @named agents always answer),
+   hops = how many times agents can pass a thread between them, maxReplies = agent replies per thread,
+   history = past messages each agent reads, thinking = reasoning effort (billed as output tokens). */
+export const TALK = {
+  brief: { label: "Brief", desc: "One agent answers, in 1–2 sentences. No thinking. Cheapest.",
+    responders: 1, hops: 2, maxReplies: 5, history: 10, thinking: "off", maxTokens: 400,
+    style: "Answer in 1-2 short sentences. Only the most relevant member should speak; if your point is already made, answer PASS." },
+  balanced: { label: "Balanced", desc: "The 2 most relevant agents answer, briefly. Light thinking.",
+    responders: 2, hops: 3, maxReplies: 10, history: 20, thinking: "low", maxTokens: 0,
+    style: "Keep it short: 2-4 sentences or a short list. Don't repeat others; if you have nothing new, answer PASS." },
+  detailed: { label: "Detailed", desc: "Everyone answers and discusses in depth. Uses the most tokens.",
+    responders: 0, hops: 6, maxReplies: 20, history: 30, thinking: null, maxTokens: 0,
+    style: "Be concise." },
+};
+export const talk = () => TALK[config.settings().talk] || TALK.balanced;
+
+const STOP = new Set("the and for you are was what how why who can with this that have has our your they them from about will just not but any all".split(" "));
+/** For a message to everyone: the `n` members whose role/persona best match it, taking turns on ties. */
+export function pickResponders(agents, text, msgId, n) {
+  if (!n || n >= agents.length) return agents;
+  const words = [...new Set((String(text).toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter((w) => w.length > 2 && !STOP.has(w)))];
+  const len = agents.length;
+  return agents
+    .map((a, i) => {
+      const about = `${a.name} ${a.role} ${a.persona}`.toLowerCase();
+      return { a, score: words.filter((w) => about.includes(w)).length, turn: (i - msgId % len + len) % len };
+    })
+    .sort((x, y) => y.score - x.score || x.turn - y.turn)
+    .slice(0, n)
+    .map((x) => x.a);
+}
+
 export const NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 const MENTION_RE = /@([a-z][a-z0-9_-]{0,31})/gi;
 const RESERVED = new Set(["user", "all", "system"]);
@@ -82,13 +115,14 @@ export class ApiError extends Error {
 async function recordUsage(row) { try { await db.addUsage(row); } catch {} }
 
 /** One chat completion. Tries the active key, then the others when a key is invalid or out of balance. */
-export async function chat({ model, messages, tools, thinking, meta = {}, fetchImpl = fetch }) {
+export async function chat({ model, messages, tools, thinking, maxTokens = 0, meta = {}, fetchImpl = fetch }) {
   const keys = config.keyOrder();
   if (!keys.length) throw new ApiError(0, "No DeepSeek API key yet. Add one in Admin.");
   const body = { model, messages };
   if (tools) body.tools = tools;
   if (!thinking || thinking === "off") body.thinking = { type: "disabled" };
   else { body.thinking = { type: "enabled" }; body.reasoning_effort = thinking; }
+  if (maxTokens) body.max_tokens = maxTokens;
   let lastErr = null;
   for (const k of keys) {
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -253,6 +287,9 @@ The human friend is "user".
 - React to what the others said, tease them a little, agree or disagree with your own opinion.
 - Don't repeat what someone else already said. If you have nothing to add, answer exactly PASS (nothing is posted).
 
+## Length
+${talk().style}
+
 ## Things you remember (use remember/recall/forget tools to manage it)
 ${memory}
 `;
@@ -277,13 +314,17 @@ The human is "user".
 ## Your skills
 ${skills}
 
+## Length
+${talk().style}
+
 ## Your persistent memory (use remember/recall/forget tools to manage it)
 ${memory}
 `;
 }
 
 async function userPrompt(team, msg) {
-  const history = (await db.thread(team.id, msg.thread_id, 31)).filter((m) => m.id < msg.id).slice(-30);
+  const n = talk().history;
+  const history = (await db.thread(team.id, msg.thread_id, n + 1)).filter((m) => m.id < msg.id).slice(-n);
   const line = (m) => `[#${m.id}] ${m.sender} -> ${m.recipients.join(", ")}: ${m.content}`;
   return `Conversation so far (oldest first):\n${history.map(line).join("\n") || "(new thread)"}` +
     `\n\nNew message for you:\n[#${msg.id}] ${msg.sender} -> ${msg.recipients.join(", ")} (hop ${msg.hop}): ${msg.content}`;
@@ -320,10 +361,14 @@ export class Engine extends EventTarget {
   }
 
   deliver(team, msg) {
-    const { maxHops } = config.settings();
+    const t = talk();
     const roster = new Set(team.agents.map((a) => a.name));
+    // A message from the user to everyone: only the most relevant members answer (unless Detailed).
+    const toAll = msg.sender === "user" && msg.recipients.includes("all");
+    const chosen = toAll ? new Set(pickResponders(team.agents, msg.content, msg.id, t.responders).map((a) => a.name)) : null;
     for (const agent of team.agents) {
-      if (!shouldReact(agent, msg, roster, maxHops)) continue;
+      if (!shouldReact(agent, msg, roster, t.hops)) continue;
+      if (chosen && !chosen.has(agent.name)) continue;
       const key = `${team.id}/${agent.name}`;
       const tail = (this.queues.get(key) || Promise.resolve()).then(() => this.handle(team.id, agent.name, msg));
       this.queues.set(key, tail.catch(() => {}));
@@ -334,7 +379,8 @@ export class Engine extends EventTarget {
     const team = await db.team(teamId);
     const agent = team?.agents.find((a) => a.name === agentName);
     if (!agent) return null; // team deleted or member removed meanwhile
-    const { model, maxReplies } = config.settings();
+    const { model } = config.settings();
+    const { maxReplies, thinking, maxTokens } = talk();
     const roster = new Set(team.agents.map((a) => a.name));
     if (await db.countThreadReplies(team.id, msg.thread_id, roster) >= maxReplies) return null;
 
@@ -349,7 +395,7 @@ export class Engine extends EventTarget {
       let reply = "";
       let step = 0;
       for (; step < MAX_TOOL_STEPS; step++) {
-        const out = await this.chat({ model, messages, tools: TOOLS, thinking: agent.thinking,
+        const out = await this.chat({ model, messages, tools: TOOLS, thinking: thinking ?? agent.thinking, maxTokens,
           meta: { team: team.id, agent: agent.name } });
         messages.push(out);
         if (!out.tool_calls?.length) { reply = (out.content || "").trim(); break; }

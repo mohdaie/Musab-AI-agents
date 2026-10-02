@@ -371,3 +371,13 @@ select.input { appearance: none; background-image: linear-gradient(45deg, transp
 .sheet-body > .btn.block { margin-top: 12px; }
 .danger-title { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 22px 0 0; }
 .sheet-body .close-sheet { margin-top: 12px; }
+
+/* ---------- talk level ---------- */
+fieldset.talk { border: 0; padding: 0; margin: 0 0 18px; display: grid; gap: 8px; }
+fieldset.talk legend { font-weight: 600; font-size: 15px; margin-bottom: 6px; padding: 0; }
+.talk-option { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1.5px solid var(--border);
+  border-radius: 12px; background: var(--bg); cursor: pointer; }
+.talk-option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.talk-option input { margin-top: 3px; accent-color: var(--accent); width: 18px; height: 18px; flex-shrink: 0; }
+.talk-option > span { display: grid; gap: 2px; }
+.talk-option .hint { color: var(--muted); font-size: 13px; }
