@@ -51,7 +51,9 @@ function deepseek(key, body) {
   }
   if (name === "jess") return msg({ content: "Ramen at Jalan Alor! @amir you coming?" });
   if (name === "amir") return msg({ content: last.content.includes("hop 1") ? "Only if there's pineapple pizza after 🍍" : "PASS" });
+  if (name === "zu" && /compile/.test(last.content)) return msg({ content: "Checklist: 1. System event log" });
   if (name === "zu") return msg({ content: "Check the System event log first." });
+  if (name === "charles") return msg({ content: "PASS — nothing to add from the database side." });
   return msg({ content: "PASS" });
 }
 const balanceOf = (key) => (key === BAD ? null : { available: key !== EMPTY, infos: [{ currency: "USD", total_balance: key === EMPTY ? "0.00" : "9.50" }], checked_at: Date.now() });
@@ -226,6 +228,16 @@ try {
   await page.click("button.send");
   await page.waitForSelector("text=Check the System event log first.");
   check(calls.length === 1 && calls[0].body.model === "deepseek-v4-pro", "engineer team uses Pro");
+  // A new message is a new thread, but agents still see the recent chat
+  calls.length = 0;
+  await page.fill("textarea", "@zu @charles compile what was said into a checklist");
+  await page.click("button.send");
+  await page.waitForSelector("text=Checklist: 1. System event log");
+  await waitCalls(() => calls.some((c) => c.name === "charles"));
+  await page.waitForTimeout(800);
+  const zuPrompt = calls.find((c) => c.name === "zu")?.body.messages[1].content || "";
+  check(zuPrompt.includes("the file server is slow") && zuPrompt.includes("Check the System event log first."), "agents see the earlier chat, not just the new thread");
+  check(!(await text()).includes("PASS"), "a reply starting with PASS is hidden");
 
   // home list
   await page.goto(APP);

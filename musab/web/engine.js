@@ -17,13 +17,13 @@ export const MODELS = {
    thinking = reasoning effort (billed as output tokens), maxTokens = reply cap. */
 export const TALK = {
   brief: { label: "Light", desc: "Answers group messages only when most relevant, in 1–2 sentences. No thinking. Cheapest.",
-    responders: 1, hops: 2, maxReplies: 5, history: 10, thinking: "off", maxTokens: 400,
+    responders: 1, hops: 2, maxReplies: 5, history: 15, thinking: "off", maxTokens: 400,
     style: "Answer in 1-2 short sentences. Only speak if you're the most relevant member; if your point is already made, answer PASS." },
   balanced: { label: "Balanced", desc: "Answers when among the 2 most relevant, in a few sentences. Light thinking.",
-    responders: 2, hops: 3, maxReplies: 10, history: 20, thinking: "low", maxTokens: 0,
+    responders: 2, hops: 3, maxReplies: 10, history: 30, thinking: "low", maxTokens: 0,
     style: "Keep it short: 2-4 sentences or a short list. Don't repeat others; if you have nothing new, answer PASS." },
   detailed: { label: "Detailed", desc: "Always answers, in depth, with full thinking. Uses the most tokens.",
-    responders: 0, hops: 6, maxReplies: 20, history: 30, thinking: null, maxTokens: 0,
+    responders: 0, hops: 6, maxReplies: 20, history: 60, thinking: null, maxTokens: 0,
     style: "Be thorough where it helps, but don't pad." },
 };
 export const TALK_LEVELS = Object.keys(TALK);
@@ -211,6 +211,7 @@ The human friend is "user".
 - Talk like a real friend in a group chat: casual, warm, short messages. Stay in character.
 - Your answer is posted to whoever messaged you. Write @name to bring a friend into the conversation; they will answer you.
 - React to what the others said, tease them a little, agree or disagree with your own opinion.
+- You can see the recent group chat; use it when someone asks what was said.
 - Don't repeat what someone else already said. If you have nothing to add, answer exactly PASS (nothing is posted).
 
 ## Length
@@ -234,6 +235,7 @@ The human is "user".
 - Or call send_message to message someone separately.
 - Stay inside your own expertise. If something belongs to another agent's skillset, hand it to them with @name instead of guessing.
 - Challenge other agents when you think they are wrong; give evidence.
+- You can see the recent group chat. When asked to summarise or compile what was said, use it.
 - If you have nothing useful to add, answer exactly PASS (nothing is posted).
 - Be concise.
 
@@ -248,11 +250,14 @@ ${memory}
 `;
 }
 
+// Agents read the recent group chat, like a person scrolling up, not just the current thread:
+// every new message from the user starts a thread, but "compile what the team said" needs the chat.
 async function userPrompt(team, agent, msg) {
   const n = talk(agent).history;
-  const history = (await db.thread(team.id, msg.thread_id, n + 1)).filter((m) => m.id < msg.id).slice(-n);
+  const history = (await db.recent(team.id, n + 20))
+    .filter((m) => m.id < msg.id && m.sender !== "system").slice(-n);
   const line = (m) => `[#${m.id}] ${m.sender} -> ${m.recipients.join(", ")}: ${m.content}`;
-  return `Conversation so far (oldest first):\n${history.map(line).join("\n") || "(new thread)"}` +
+  return `Recent group chat (oldest first, last ${n} messages):\n${history.map(line).join("\n") || "(no earlier messages)"}` +
     `\n\nNew message for you:\n[#${msg.id}] ${msg.sender} -> ${msg.recipients.join(", ")} (hop ${msg.hop}): ${msg.content}`;
 }
 
@@ -339,7 +344,7 @@ export class Engine extends EventTarget {
         const last = messages[messages.length - 1];
         reply = last.role === "assistant" ? (last.content || "").trim() : "";
       }
-      if (!reply || /^pass\.?$/i.test(reply)) return null;
+      if (!reply || /^\W*pass\b/i.test(reply)) return null; // "PASS", "PASS — nothing to add", ...
       const mentions = [...reply.matchAll(MENTION_RE)].map((m) => m[1].toLowerCase()).filter((n) => roster.has(n) && n !== agent.name);
       const out = await db.post(team.id, agent.name, [msg.sender, ...mentions], reply, msg);
       this.deliver(team, out);
