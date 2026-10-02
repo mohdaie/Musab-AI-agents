@@ -1,7 +1,6 @@
-/* On-device storage. Everything lives in this browser; nothing goes to a server except the
-   DeepSeek requests themselves.
-   - IndexedDB "musab": teams, messages (the bus), memories, usage (one row per API request)
-   - localStorage: API keys, settings, admin login (small values) */
+/* On-device storage (IndexedDB "musab"): teams, messages (the bus) and agent memories.
+   Admin login, API keys, settings and usage live on the server (see server.js).
+   The old "usage" store from earlier versions is left in place but no longer used. */
 
 const DB_NAME = "musab";
 const DB_VERSION = 1;
@@ -150,97 +149,4 @@ export const db = {
     return true;
   },
 
-  // ---------------------------------------------------------------- usage
-  async addUsage(row) { return done((await store("usage", "readwrite")).add(row)); },
-  async usageSince(ts = 0) {
-    return done((await store("usage")).index("ts").getAll(IDBKeyRange.lowerBound(ts)));
-  },
-  async clearUsage() { return done((await store("usage", "readwrite")).clear()); },
-};
-
-// ------------------------------------------------------------------ small settings in localStorage
-function readJSON(key, fallback) {
-  try { const v = JSON.parse(localStorage.getItem(key)); return v ?? fallback; } catch { return fallback; }
-}
-function writeJSON(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
-}
-function emit() { try { window.dispatchEvent(new CustomEvent("musab-config")); } catch {} }
-
-export const DEFAULT_SETTINGS = { model: "deepseek-v4-pro", talk: "balanced", fallback: true };
-
-export const config = {
-  settings() { return { ...DEFAULT_SETTINGS, ...readJSON("musab.settings", {}) }; },
-  saveSettings(s) { writeJSON("musab.settings", { ...this.settings(), ...s }); emit(); },
-
-  /** [{id, label, key, created_at, status, balance}] */
-  keys() { const k = readJSON("musab.keys", []); return Array.isArray(k) ? k : []; },
-  saveKeys(keys) { writeJSON("musab.keys", keys); emit(); },
-  activeKeyId() {
-    const keys = this.keys(), id = this.settings().activeKey;
-    return keys.some((k) => k.id === id) ? id : keys[0]?.id || null;
-  },
-  addKey(label, key) {
-    const keys = this.keys();
-    const row = { id: crypto.randomUUID?.() || String(Date.now()) + Math.random().toString(16).slice(2),
-      label: label || `Key ${keys.length + 1}`, key, created_at: Date.now(), status: "unchecked", balance: null };
-    keys.push(row);
-    this.saveKeys(keys);
-    if (keys.length === 1) this.saveSettings({ activeKey: row.id });
-    return row;
-  },
-  updateKey(id, patch) { this.saveKeys(this.keys().map((k) => (k.id === id ? { ...k, ...patch } : k))); },
-  removeKey(id) {
-    this.saveKeys(this.keys().filter((k) => k.id !== id));
-    if (this.settings().activeKey === id) this.saveSettings({ activeKey: this.keys()[0]?.id || null });
-  },
-  /** Keys in the order to try them: active first, then the rest (if fallback is on).
-      Keys that last failed (invalid / no balance) go to the back but are still tried as a last resort. */
-  keyOrder() {
-    const keys = this.keys(), active = this.activeKeyId();
-    const first = keys.filter((k) => k.id === active);
-    if (!this.settings().fallback) return first;
-    const bad = (k) => (k.status === "invalid" || k.status === "no-balance" ? 1 : 0);
-    return [...first, ...keys.filter((k) => k.id !== active)].sort((a, b) => bad(a) - bad(b));
-  },
-};
-
-// ------------------------------------------------------------------ admin login (this device only)
-const ADMIN_KEY = "musab.admin";
-const SESSION_KEY = "musab.adminUntil";
-export const DEFAULT_ADMIN = { username: "admin", password: "admin" };
-
-async function pbkdf2(password, saltHex, iterations) {
-  if (!crypto.subtle) throw new Error("Open the app over HTTPS (or localhost) to manage the admin password.");
-  const salt = Uint8Array.from(saltHex.match(/../g).map((h) => parseInt(h, 16)));
-  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, base, 256);
-  return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-export const admin = {
-  isDefault() { return !readJSON(ADMIN_KEY, null); },
-  username() { return readJSON(ADMIN_KEY, null)?.username || DEFAULT_ADMIN.username; },
-  async verify(username, password) {
-    const saved = readJSON(ADMIN_KEY, null);
-    if (!saved) return username === DEFAULT_ADMIN.username && password === DEFAULT_ADMIN.password;
-    if (username.trim().toLowerCase() !== saved.username) return false;
-    return (await pbkdf2(password, saved.salt, saved.iterations)) === saved.hash;
-  },
-  async setLogin(username, password) {
-    const salt = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
-    const iterations = 210000;
-    const hash = await pbkdf2(password, salt, iterations);
-    writeJSON(ADMIN_KEY, { username: username.trim().toLowerCase(), salt, iterations, hash });
-  },
-  /** Forgot the password: wipe the login AND the API keys, so a reset never exposes keys. */
-  reset() {
-    try { localStorage.removeItem(ADMIN_KEY); } catch {}
-    config.saveKeys([]);
-    config.saveSettings({ activeKey: null });
-    this.signOut();
-  },
-  signIn(hours = 12) { try { sessionStorage.setItem(SESSION_KEY, String(Date.now() + hours * 3600e3)); } catch {} },
-  signOut() { try { sessionStorage.removeItem(SESSION_KEY); } catch {} },
-  signedIn() { try { return Number(sessionStorage.getItem(SESSION_KEY) || 0) > Date.now(); } catch { return false; } },
 };

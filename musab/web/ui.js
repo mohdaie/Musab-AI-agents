@@ -73,3 +73,27 @@ export function toast(msg) {
   clearTimeout(toast.t);
   toast.t = setTimeout(() => ($toast.hidden = true), 3500);
 }
+
+ICONS.more = '<circle cx="12" cy="5" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="19" r="1.6" fill="currentColor"/>';
+ICONS.group = '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><circle cx="17" cy="9" r="2.6"/><path d="M16.5 14.6c2.7.2 4.4 1.9 5 4.9"/>';
+ICONS.mic = '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/>';
+ICONS.check2 = '<path d="M2 13l4 4 8-9M10 15l2 2 8-9"/>';
+
+/** WhatsApp-style top bar: back arrow, optional avatar, title (+ subtitle), action buttons. */
+export function appbar({ title, subtitle = null, back = null, avatarEl = null, onTitle = null, actions = [] }) {
+  const titleBox = h(onTitle ? "button" : "div", { class: "appbar-title", onclick: onTitle || null },
+    avatarEl, h("span", { class: "appbar-text" }, h("strong", {}, title), subtitle != null ? h("small", {}, subtitle) : null));
+  return h("header", { class: "appbar" },
+    back ? h("button", { class: "icon-btn", "aria-label": "Back", html: icon("back"), onclick: back }) : null,
+    titleBox,
+    h("div", { class: "appbar-actions" }, actions));
+}
+
+/** Group avatar: up to 3 member initials in a ring, or a group icon. */
+export function groupAvatar(team, size = "") {
+  const a = h("span", { class: `group-avatar ${size}`, "aria-hidden": "true" });
+  const first = (team.name || "?").trim()[0] || "?";
+  a.textContent = first.toUpperCase();
+  a.style.setProperty("--c", colorFor(team.id || team.name || "?"));
+  return a;
+}

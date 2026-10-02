@@ -1,30 +1,13 @@
 /* The agents, running in this browser. Same rules as the Python version (musab/agent.py):
    every agent decides for itself whether to react, has its own prompt, skills and memory,
    pulls others in with @name, and agent-to-agent chains stop at the hop limit. */
-import { config, db } from "./db.js";
+import { db } from "./db.js";
+import { api, session } from "./server.js";
 
-export const API_BASE = "https://api.deepseek.com";
 export const MODELS = {
   "deepseek-v4-pro": "DeepSeek V4 Pro (strongest)",
   "deepseek-flash": "DeepSeek V4.1 Flash (cheaper, faster)",
 };
-// USD per 1M tokens as [off-peak, peak]. Source: api-docs.deepseek.com/quick_start/pricing (Oct 2026).
-export const PRICES = {
-  "deepseek-flash": { hit: [0.003, 0.006], miss: [0.15, 0.3], out: [0.6, 1.2] },
-  "deepseek-v4-pro": { hit: [0.022, 0.044], miss: [0.66, 1.32], out: [1.98, 3.96] },
-};
-// Peak: 01:00-04:00 and 06:00-10:00 UTC, Monday to Friday.
-export function isPeak(ms) {
-  const d = new Date(ms), day = d.getUTCDay(), h = d.getUTCHours();
-  return day >= 1 && day <= 5 && ((h >= 1 && h < 4) || (h >= 6 && h < 10));
-}
-export function estimateCost(model, u, ms) {
-  const p = PRICES[model];
-  if (!p) return 0;
-  const i = isPeak(ms) ? 1 : 0;
-  const hit = u.cacheHit || 0, miss = u.cacheMiss || Math.max(0, (u.prompt || 0) - hit);
-  return (hit * p.hit[i] + miss * p.miss[i] + (u.completion || 0) * p.out[i]) / 1e6;
-}
 
 /* How much the agents talk. This is the main lever on token use:
    responders = how many agents answer a message sent to everyone (0 = all; @named agents always answer),
@@ -41,7 +24,7 @@ export const TALK = {
     responders: 0, hops: 6, maxReplies: 20, history: 30, thinking: null, maxTokens: 0,
     style: "Be concise." },
 };
-export const talk = () => TALK[config.settings().talk] || TALK.balanced;
+export const talk = () => TALK[session.settings().talk] || TALK.balanced;
 
 const STOP = new Set("the and for you are was what how why who can with this that have has our your they them from about will just not but any all".split(" "));
 /** For a message to everyone: the `n` members whose role/persona best match it, taking turns on ties. */
@@ -96,7 +79,6 @@ const TOOLS = [
 ];
 const SHARED = "_shared";
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const slug = (s, n) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, n).replace(/^-+|-+$/g, "");
 
 /** '@zu @charles why is X slow' -> [['zu','charles'], 'why is X slow'] */
@@ -107,82 +89,11 @@ export function parseTo(text, fallback = ["all"]) {
   return [to.length ? to : fallback, text.trim()];
 }
 
-// ------------------------------------------------------------------ DeepSeek
-export class ApiError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
-}
-
-async function recordUsage(row) { try { await db.addUsage(row); } catch {} }
-
-/** One chat completion. Tries the active key, then the others when a key is invalid or out of balance. */
-export async function chat({ model, messages, tools, thinking, maxTokens = 0, meta = {}, fetchImpl = fetch }) {
-  const keys = config.keyOrder();
-  if (!keys.length) throw new ApiError(0, "No DeepSeek API key yet. Add one in Admin.");
-  const body = { model, messages };
-  if (tools) body.tools = tools;
-  if (!thinking || thinking === "off") body.thinking = { type: "disabled" };
-  else { body.thinking = { type: "enabled" }; body.reasoning_effort = thinking; }
-  if (maxTokens) body.max_tokens = maxTokens;
-  let lastErr = null;
-  for (const k of keys) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const t0 = Date.now();
-      let res, data = null;
-      try {
-        res = await fetchImpl(`${API_BASE}/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${k.key}` },
-          body: JSON.stringify(body),
-        });
-        data = await res.json().catch(() => null);
-      } catch (e) {
-        lastErr = new ApiError(0, `Can't reach DeepSeek (${e.message}). Check your connection.`);
-        await sleep(1000 * 2 ** attempt);
-        continue;
-      }
-      const u = data?.usage || {};
-      const usage = {
-        prompt: u.prompt_tokens || 0, completion: u.completion_tokens || 0,
-        cacheHit: u.prompt_cache_hit_tokens || 0, cacheMiss: u.prompt_cache_miss_tokens || 0,
-        reasoning: u.completion_tokens_details?.reasoning_tokens || 0,
-      };
-      recordUsage({ ts: t0, keyId: k.id, model, team: meta.team || "", agent: meta.agent || "", ok: res.ok,
-        status: res.status, ...usage, cost: res.ok ? estimateCost(model, usage, t0) : 0,
-        ms: Date.now() - t0, error: res.ok ? "" : String(data?.error?.message || "").slice(0, 200) });
-      if (res.ok) {
-        if (k.status !== "ok") config.updateKey(k.id, { status: "ok" });
-        if (k.id !== config.activeKeyId()) config.saveSettings({ activeKey: k.id }); // fell back: make the working key active
-        const msg = data?.choices?.[0]?.message || {};
-        const out = { role: "assistant", content: msg.content || "" };
-        // DeepSeek wants reasoning_content sent back on later requests that carry tools.
-        if (msg.reasoning_content) out.reasoning_content = msg.reasoning_content;
-        if (msg.tool_calls?.length) out.tool_calls = msg.tool_calls;
-        return out;
-      }
-      const detail = data?.error?.message || res.statusText || "request failed";
-      lastErr = new ApiError(res.status, `DeepSeek ${res.status}: ${detail}`);
-      if (res.status === 401 || res.status === 402) {  // bad key / no balance: next key
-        config.updateKey(k.id, { status: res.status === 401 ? "invalid" : "no-balance" });
-        break;
-      }
-      if (![429, 500, 502, 503, 504].includes(res.status)) throw lastErr;
-      await sleep(1000 * 2 ** attempt);
-    }
-  }
-  throw lastErr;
-}
-
-/** GET /user/balance for one key. */
-export async function checkBalance(key, fetchImpl = fetch) {
-  let res;
-  try {
-    res = await fetchImpl(`${API_BASE}/user/balance`, { headers: { Authorization: `Bearer ${key}` } });
-  } catch (e) {
-    throw new ApiError(0, `Can't reach DeepSeek (${e.message}).`);
-  }
-  const data = await res.json().catch(() => null);
-  if (!res.ok) throw new ApiError(res.status, data?.error?.message || `HTTP ${res.status}`);
-  return { available: !!data?.is_available, infos: data?.balance_infos || [], checked_at: Date.now() };
+// ------------------------------------------------------------------ DeepSeek (through the server)
+/** One chat completion, relayed by the server with its stored keys (fallback and usage are handled there). */
+export async function chat({ model, messages, tools, thinking, maxTokens = 0, meta = {} }) {
+  if (!session.signedIn()) throw new Error("This device isn't signed in. Open Admin and sign in so the agents can reply.");
+  return api("/chat", { method: "POST", body: { model, messages, tools, thinking: thinking || "off", max_tokens: maxTokens || 0, meta } });
 }
 
 // ------------------------------------------------------------------ teams
@@ -351,8 +262,10 @@ export class Engine extends EventTarget {
     const unknown = to.find((t) => t !== "all" && !names.has(t));
     if (unknown) throw new Error(`No one called @${unknown} in this team`);
     const msg = await db.post(team.id, "user", to, text);
-    if (!config.keys().length) {
-      await db.post(team.id, "system", ["user"], "No DeepSeek API key yet. Open Admin and add one, then send your message again.", msg);
+    if (!session.signedIn() || session.mustChange()) {
+      await db.post(team.id, "system", ["user"], session.signedIn()
+        ? "Change the default admin password in Admin first, then send your message again."
+        : "This device isn't signed in. Open Admin and sign in, then send your message again.", msg);
     } else {
       this.deliver(team, msg);
     }
@@ -379,7 +292,7 @@ export class Engine extends EventTarget {
     const team = await db.team(teamId);
     const agent = team?.agents.find((a) => a.name === agentName);
     if (!agent) return null; // team deleted or member removed meanwhile
-    const { model } = config.settings();
+    const model = session.settings().models[team.style] || "deepseek-v4-pro";
     const { maxReplies, thinking, maxTokens } = talk();
     const roster = new Set(team.agents.map((a) => a.name));
     if (await db.countThreadReplies(team.id, msg.thread_id, roster) >= maxReplies) return null;
