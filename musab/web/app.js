@@ -27,28 +27,33 @@ window.addEventListener("storage", checkStatus);
 
 // ------------------------------------------------------------------ router
 let cleanup = null;
+let routeSeq = 0; // async views draw only if they are still the current route
 function go(hash) { if (location.hash !== hash) location.hash = hash; else route(); }
 function route() {
   if (cleanup) { cleanup(); cleanup = null; }
+  const seq = ++routeSeq;
+  const current = () => seq === routeSeq;
   if ($sheet.open) $sheet.close();
   window.scrollTo(0, 0);
   const [, view, id] = location.hash.split("/");
   if (view === "new") return wizard.start();
-  if (view === "admin") return adminView({ go, setCleanup: (fn) => (cleanup = fn) });
-  if (view === "team" && id) return chatView(decodeURIComponent(id));
-  return homeView();
+  if (view === "admin") return adminView({ go, current, setCleanup: (fn) => { if (current()) cleanup = fn; else fn(); } });
+  if (view === "team" && id) return chatView(decodeURIComponent(id), current);
+  return homeView(current);
 }
 window.addEventListener("hashchange", route);
 
 // ------------------------------------------------------------------ home
-async function homeView() {
+async function homeView(current) {
   $app.replaceChildren(h("div", { class: "spinner" }));
   let teams;
   try { teams = await teamsWithLast(); } catch (e) {
+    if (!current()) return;
     $app.replaceChildren(h("div", { class: "page" }, h("p", { class: "error" }, `Can't open this device's storage: ${e.message}`),
-      h("button", { class: "btn", onclick: homeView }, "Try again")));
+      h("button", { class: "btn", onclick: route }, "Try again")));
     return;
   }
+  if (!current()) return;
   const page = h("div", { class: "page" });
   if (!teams.length) {
     page.append(h("div", { class: "hero" },
@@ -222,10 +227,11 @@ const wizard = {
 };
 
 // ------------------------------------------------------------------ chat
-async function chatView(id) {
+async function chatView(id, current) {
   $app.replaceChildren(h("div", { class: "spinner" }));
   let team;
   try { team = await db.team(id); } catch {}
+  if (!current()) return;
   if (!team) {
     $app.replaceChildren(h("div", { class: "page" }, h("p", { class: "error" }, "This team doesn't exist on this device."),
       h("button", { class: "btn", onclick: () => go("#/") }, "Back to teams")));

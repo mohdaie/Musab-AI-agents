@@ -44,13 +44,13 @@ function page(...kids) {
 }
 
 // ------------------------------------------------------------------ entry
-export async function adminView({ go, setCleanup }) {
-  if (!admin.signedIn()) return loginView(go, setCleanup);
+export async function adminView({ go, current, setCleanup }) {
+  if (!admin.signedIn()) return loginView(go, current, setCleanup);
   return dashboard(go, setCleanup);
 }
 
 // ------------------------------------------------------------------ login
-function loginView(go, setCleanup) {
+function loginView(go, current, setCleanup) {
   const user = h("input", { class: "input", id: "adm-user", autocomplete: "username", autocapitalize: "off", spellcheck: "false", required: true });
   const pass = h("input", { class: "input", id: "adm-pass", type: "password", autocomplete: "current-password", required: true });
   const err = h("p", { class: "error", hidden: true });
@@ -61,7 +61,8 @@ function loginView(go, setCleanup) {
     try {
       if (await admin.verify(user.value.trim(), pass.value)) {
         admin.signIn();
-        return dashboard(go, setCleanup);
+        if (current()) dashboard(go, setCleanup);
+        return;
       }
       err.textContent = "Wrong username or password."; err.hidden = false;
       pass.select();
@@ -77,7 +78,7 @@ function loginView(go, setCleanup) {
       : h("p", { class: "muted small center" },
         h("button", { type: "button", class: "link-btn", onclick: () => {
           if (!confirm("Reset the admin login to admin / admin?\n\nFor safety this also deletes the API keys saved on this device. Your teams and chats stay.")) return;
-          admin.reset(); toast("Login reset. Sign in with admin / admin and add your keys again."); loginView(go, setCleanup);
+          admin.reset(); toast("Login reset. Sign in with admin / admin and add your keys again."); loginView(go, current, setCleanup);
         } }, "Forgot password?")));
   $app.replaceChildren(page(
     h("div", { class: "topbar" },
@@ -112,14 +113,13 @@ async function dashboard(go, setCleanup) {
       "The admin login protects this screen on this device. Anyone who opens the app link on their own device gets an empty app and needs their own key."),
   ].filter(Boolean));
   $app.replaceChildren(root);
-  await render();
-
-  // Refresh balances in the background, then redraw.
-  const keys = config.keys();
-  Promise.allSettled(keys.map((k) => refreshBalance(k))).then(() => { if (root.isConnected) rerender(); });
   const onCfg = () => { if (root.isConnected) renderKeys(keysCard, rerender); };
   window.addEventListener("musab-config", onCfg);
   setCleanup(() => window.removeEventListener("musab-config", onCfg));
+  await render();
+
+  // Refresh balances in the background, then redraw.
+  Promise.allSettled(config.keys().map((k) => refreshBalance(k))).then(() => { if (root.isConnected) rerender(); });
 }
 
 async function refreshBalance(k) {
