@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musab-ai-agents"
+version = "0.1.0"
+description = "A dynamic team of independent DeepSeek agents with their own skills and persistent memory"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0"]
+license = { text = "MIT" }
+
+[project.scripts]
+musab = "musab.cli:main"
+
+[tool.setuptools]
+packages = ["musab"]
+
+[tool.setuptools.package-data]
+musab = ["web/*", "web/icons/*"]
