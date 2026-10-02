@@ -59,6 +59,12 @@ function collect(source, range, limit, direction = "next") {
   });
 }
 
+// Delete every record an index cursor visits (inside an open readwrite transaction).
+function deleteWhere(index, range) {
+  const r = index.openKeyCursor(range);
+  r.onsuccess = () => { const c = r.result; if (c) { index.objectStore.delete(c.primaryKey); c.continue(); } };
+}
+
 // ------------------------------------------------------------------ teams
 export const db = {
   async teams() { return done((await store("teams")).getAll()); },
@@ -69,11 +75,15 @@ export const db = {
     const d = await open();
     const t = d.transaction(["teams", "messages", "memories"], "readwrite");
     t.objectStore("teams").delete(id);
-    const range = IDBKeyRange.bound([id, 0], [id, Infinity]);
-    const mc = t.objectStore("messages").index("team_id").openKeyCursor(range);
-    mc.onsuccess = () => { const c = mc.result; if (c) { t.objectStore("messages").delete(c.primaryKey); c.continue(); } };
-    const memc = t.objectStore("memories").index("team").openKeyCursor(IDBKeyRange.only(id));
-    memc.onsuccess = () => { const c = memc.result; if (c) { t.objectStore("memories").delete(c.primaryKey); c.continue(); } };
+    deleteWhere(t.objectStore("messages").index("team_id"), IDBKeyRange.bound([id, 0], [id, Infinity]));
+    deleteWhere(t.objectStore("memories").index("team"), IDBKeyRange.only(id));
+    await finished(t);
+  },
+
+  /** Clear a team's chat. Members and their memory stay. */
+  async clearMessages(id) {
+    const t = (await open()).transaction("messages", "readwrite");
+    deleteWhere(t.objectStore("messages").index("team_id"), IDBKeyRange.bound([id, 0], [id, Infinity]));
     await finished(t);
   },
 
@@ -123,6 +133,14 @@ export const db = {
     const m = { team, owner, content: String(content).trim(), created_at: Date.now() / 1000 };
     m.id = await done((await store("memories", "readwrite")).add(m));
     return m;
+  },
+  /** Delete one member's private memories (team memory stays). */
+  async deleteMemories(team, owner) {
+    const t = (await open()).transaction("memories", "readwrite");
+    const s = t.objectStore("memories");
+    const r = s.index("team").openCursor(IDBKeyRange.only(team));
+    r.onsuccess = () => { const c = r.result; if (c) { if (c.value.owner === owner) c.delete(); c.continue(); } };
+    await finished(t);
   },
   async forget(team, owners, id) {
     const s = await store("memories", "readwrite");

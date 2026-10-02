@@ -2,7 +2,7 @@
    teams, chats and memory are stored in this browser and the agents call DeepSeek directly. */
 import { adminView } from "./admin.js";
 import { config, db } from "./db.js";
-import { Engine, createTeam } from "./engine.js";
+import { Engine, addMember, createTeam, removeMember } from "./engine.js";
 import { $app, $banner, $sheet, avatar, colorFor, fmtTime, h, icon, richText, toast } from "./ui.js";
 
 // ------------------------------------------------------------------ data (all on this device)
@@ -368,20 +368,65 @@ async function chatView(id, current) {
 }
 
 function teamSheet(team) {
+  const friends = team.style === "friends";
+  const kind = KINDS[team.style];
+  // Re-open the chat so the header, name chips and messages show the change, then the sheet again.
+  const refresh = async (msg) => { toast(msg); $sheet.close(); route(); const t = await db.team(team.id); if (t) setTimeout(() => teamSheet(t), 50); };
+
+  const addForm = () => {
+    const taken = new Set(team.agents.map((a) => a.name));
+    const placeholder = kind.names.find((n) => !taken.has(n)) || `agent${team.agents.length + 1}`;
+    const name = h("input", { class: "input", id: "add-name", maxlength: 32, autocomplete: "off", autocapitalize: "off", spellcheck: "false", placeholder,
+      oninput: (e) => { e.target.value = e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ""); } });
+    const role = h("input", { class: "input", id: "add-role", maxlength: 120, placeholder: kind.role, required: true });
+    const about = h("textarea", { class: "textarea", id: "add-about", maxlength: 2000, placeholder: kind.about });
+    const err = h("p", { class: "error", hidden: true });
+    const save = h("button", { class: "btn primary", type: "submit" }, "Add");
+    return h("form", { class: "add-member", onsubmit: async (e) => {
+      e.preventDefault();
+      save.disabled = true;
+      try {
+        await addMember(team.id, { name: name.value || placeholder, role: role.value, about: about.value });
+        refresh(`@${name.value || placeholder} joined`);
+      } catch (ex) { err.textContent = ex.message; err.hidden = false; save.disabled = false; }
+    } },
+      h("h3", {}, friends ? "Add a friend" : "Add a team member"),
+      h("div", { class: "row" },
+        h("div", { class: "field" }, h("label", { for: "add-name" }, "Name"), h("div", { class: "handle" }, name)),
+        h("div", { class: "field" }, h("label", { for: "add-role" }, "Designation"), role)),
+      h("div", { class: "field" }, h("label", { for: "add-about" }, friends ? "Personality" : "Expert at / characteristic"), about),
+      err,
+      h("div", { class: "footer-actions" },
+        h("button", { class: "btn", type: "button", onclick: () => form.replaceWith(addBtn) }, "Cancel"), save));
+  };
+  let form;
+  const addBtn = h("button", { class: "btn block", disabled: team.agents.length >= 12, html: `${icon("plus")} ${friends ? "Add a friend" : "Add a member"}`,
+    onclick: () => { form = addForm(); addBtn.replaceWith(form); form.querySelector("#add-role").focus(); } });
+
   const body = h("div", { class: "sheet-body" },
     h("h2", {}, team.name),
-    h("p", { class: "sub" }, team.style === "friends" ? "Group of friends" : "Team of engineers"),
+    h("p", { class: "sub" }, `${friends ? "Group of friends" : "Team of engineers"} · ${team.agents.length} member${team.agents.length > 1 ? "s" : ""}`),
     team.agents.map((a) => h("div", { class: "member-row" }, avatar(a.name, "lg"),
-      h("div", {}, h("strong", {}, "@" + a.name), h("div", { class: "role" }, a.role), a.persona ? h("p", {}, a.persona) : null))),
+      h("div", { class: "member-info" }, h("strong", {}, "@" + a.name), h("div", { class: "role" }, a.role), a.persona ? h("p", {}, a.persona) : null),
+      h("button", { class: "btn small danger", "aria-label": `Remove ${a.name}`, disabled: team.agents.length <= 1,
+        title: team.agents.length <= 1 ? "A team needs at least one member" : "", onclick: async () => {
+          if (!confirm(`Remove @${a.name} from “${team.name}”? Their own memory is deleted; their old messages stay in the chat.`)) return;
+          try { await removeMember(team.id, a.name); refresh(`@${a.name} removed`); } catch (e) { toast(e.message); }
+        } }, "Remove"))),
+    addBtn,
+    h("h3", { class: "danger-title" }, "Delete"),
     h("div", { class: "footer-actions" },
       h("button", { class: "btn danger", onclick: async () => {
-        if (!confirm(`Delete “${team.name}” and its whole chat history and memory? This can't be undone.`)) return;
-        try { await db.deleteTeam(team.id); $sheet.close(); go("#/"); }
-        catch (e) { toast(e.message); }
-      } }, "Delete team"),
-      h("button", { class: "btn primary", onclick: () => $sheet.close() }, "Close")));
+        if (!confirm(`Clear the whole chat in “${team.name}”? The members and what they remember stay. This can't be undone.`)) return;
+        try { await db.clearMessages(team.id); toast("Chat cleared"); $sheet.close(); route(); } catch (e) { toast(e.message); }
+      } }, "Clear chat"),
+      h("button", { class: "btn danger", onclick: async () => {
+        if (!confirm(`Delete “${team.name}” with all its members, chat and memory? This can't be undone.`)) return;
+        try { await db.deleteTeam(team.id); $sheet.close(); go("#/"); toast("Team deleted"); } catch (e) { toast(e.message); }
+      } }, "Delete team")),
+    h("button", { class: "btn primary block close-sheet", onclick: () => $sheet.close() }, "Close"));
   $sheet.replaceChildren(body);
-  $sheet.showModal();
+  if (!$sheet.open) $sheet.showModal();
 }
 $sheet.addEventListener("click", (e) => { if (e.target === $sheet) $sheet.close(); });
 
