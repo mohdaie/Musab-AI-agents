@@ -2,7 +2,7 @@
    every agent decides for itself whether to react, has its own prompt, skills and memory,
    pulls others in with @name, and agent-to-agent chains stop at the hop limit. */
 import { db } from "./db.js";
-import { api, session } from "./server.js";
+import { api, session, skills } from "./server.js";
 
 export const MODELS = {
   "deepseek-v4-pro": "DeepSeek V4 Pro (strongest)",
@@ -81,6 +81,22 @@ const TOOLS = [
     parameters: { type: "object", properties: {} } } },
 ];
 const SHARED = "_shared";
+// Only offered to agents that have skills from Admin → Skills: they see names + descriptions,
+// and open a skill's full instructions with this tool when it fits the task.
+const USE_SKILL = { type: "function", function: {
+  name: "use_skill",
+  description: "Open one of your skills to read its full instructions. Do this before a task the skill covers.",
+  parameters: { type: "object", properties: { name: { type: "string", description: "The skill's name" } }, required: ["name"] } } };
+const agentSkills = (agent) => (agent.skillIds || []).map((id) => skills.byId(id)).filter(Boolean);
+function skillsSection(agent) {
+  const list = agentSkills(agent);
+  if (!list.length) return "";
+  return `\n## Skills you can use
+These are your skills. When a task matches one, call use_skill with its name first and follow its instructions.
+Some skills mention scripts or files; you can't run those, so follow the written guidance only.
+${list.map((s) => `- ${s.name}: ${s.description || "(no description)"}`).join("\n")}
+`;
+}
 
 const slug = (s, n) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, n).replace(/^-+|-+$/g, "");
 
@@ -129,6 +145,16 @@ function makeAgent(a, i, style, seen) {
   seen.add(n);
   const level = TALK[a.talk] ? a.talk : (TALK[session.settings().talk] ? session.settings().talk : "balanced");
   return { name: n, role, persona, talk: level, skills: style === "work" ? ["critical-review"] : [], thinking: style === "work" ? "high" : "low" };
+}
+
+/** Choose which skills (from Admin → Skills) one member has. */
+export async function setAgentSkills(teamId, name, ids) {
+  const team = await db.team(teamId);
+  const agent = team?.agents.find((a) => a.name === name);
+  if (!agent) throw new Error(`No one called @${name} in this team`);
+  agent.skillIds = [...new Set(ids.filter((id) => skills.byId(id)))];
+  await db.saveTeam(team);
+  return team;
 }
 
 /** Change how much one member talks (Light / Balanced / Detailed). */
@@ -214,6 +240,7 @@ The human friend is "user".
 - You can see the recent group chat; use it when someone asks what was said.
 - Don't repeat what someone else already said. If you have nothing to add, answer exactly PASS (nothing is posted).
 
+${skillsSection(agent)}
 ## Length
 ${talk(agent).style}
 
@@ -242,6 +269,7 @@ The human is "user".
 ## Your skills
 ${skills}
 
+${skillsSection(agent)}
 ## Length
 ${talk(agent).style}
 
@@ -329,7 +357,8 @@ export class Engine extends EventTarget {
       let reply = "";
       let step = 0;
       for (; step < MAX_TOOL_STEPS; step++) {
-        const out = await this.chat({ model, messages, tools: TOOLS, thinking: thinking ?? agent.thinking, maxTokens,
+        const tools = agentSkills(agent).length ? [...TOOLS, USE_SKILL] : TOOLS;
+        const out = await this.chat({ model, messages, tools, thinking: thinking ?? agent.thinking, maxTokens,
           meta: { team: team.id, agent: agent.name } });
         messages.push(out);
         if (!out.tool_calls?.length) { reply = (out.content || "").trim(); break; }
@@ -381,6 +410,14 @@ export class Engine extends EventTarget {
     }
     if (name === "forget") {
       return (await db.forget(team.id, [agent.name, SHARED], args.memory_id)) ? "deleted" : "no such memory";
+    }
+    if (name === "use_skill") {
+      const want = String(args.name || "").toLowerCase().trim();
+      const s = agentSkills(agent).find((k) => k.name === want);
+      if (!s) return `No skill called "${args.name}". Your skills: ${agentSkills(agent).map((k) => k.name).join(", ") || "none"}`;
+      await db.post(team.id, "system", ["user"], `📘 ${agent.name} is using the skill “${s.name}”`, msg);
+      this.changed(team.id);
+      return `# Skill: ${s.name}\n${s.body}`;
     }
     if (name === "list_agents") {
       return team.agents.map((a) => `${a.name}: ${a.role}`).join("\n");

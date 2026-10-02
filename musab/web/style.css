@@ -409,3 +409,24 @@ fieldset.talk legend { font-weight: 600; font-size: 15px; margin-bottom: 6px; pa
 .talk-option input { margin-top: 3px; accent-color: var(--accent); width: 18px; height: 18px; flex-shrink: 0; }
 .talk-option > span { display: grid; gap: 2px; }
 .talk-option .hint { color: var(--muted); font-size: 13px; }
+
+/* ---------- skills ---------- */
+.skills-field { margin-top: 10px; }
+.skill-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.label-sm { font-size: 13px; font-weight: 600; color: var(--muted); margin-right: 2px; }
+.skill-chip { font-size: 13px; padding: 3px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent-soft-text); }
+.skill-pick { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+.skill-option { display: flex; gap: 10px; align-items: flex-start; padding: 6px 2px; cursor: pointer; }
+.skill-option input { margin-top: 3px; width: 18px; height: 18px; accent-color: var(--accent); flex-shrink: 0; }
+.skill-option span { display: grid; min-width: 0; }
+.skill-option small, .skill-row small { color: var(--muted); font-size: 12.5px; line-height: 1.35; }
+.skill-list { display: grid; gap: 8px; margin: 12px 0; }
+.skill-row { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+.skill-row .main { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.skill-row .src { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.discover { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px; }
+.discover-results { display: grid; gap: 4px; max-height: 420px; overflow-y: auto; margin: 10px 0; padding: 6px; border: 1px solid var(--border); border-radius: 12px; }
+.tag-warn { font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--warn-bg); color: var(--warn-text); margin-left: 6px; white-space: nowrap; }
+.skill-body { width: 100%; min-height: 260px; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+details.write { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+details.write summary { cursor: pointer; font-weight: 600; }

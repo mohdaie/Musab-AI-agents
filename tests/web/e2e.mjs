@@ -51,6 +51,10 @@ function deepseek(key, body) {
   }
   if (name === "jess") return msg({ content: "Ramen at Jalan Alor! @amir you coming?" });
   if (name === "amir") return msg({ content: last.content.includes("hop 1") ? "Only if there's pineapple pizza after 🍍" : "PASS" });
+  if (name === "zu" && /postmortem/.test(last.content) && last.role === "user") {
+    return msg({ content: "", tool_calls: [{ id: "s1", type: "function", function: { name: "use_skill", arguments: JSON.stringify({ name: "incident-postmortem" }) } }] });
+  }
+  if (name === "zu" && last.role === "tool" && /# Skill: incident-postmortem/.test(last.content)) return msg({ content: "Postmortem: timeline, root cause, actions." });
   if (name === "zu" && /compile/.test(last.content)) return msg({ content: "Checklist: 1. System event log" });
   if (name === "zu") return msg({ content: "Check the System event log first." });
   if (name === "charles") return msg({ content: "PASS — nothing to add from the database side." });
@@ -59,7 +63,13 @@ function deepseek(key, body) {
 const balanceOf = (key) => (key === BAD ? null : { available: key !== EMPTY, infos: [{ currency: "USD", total_balance: key === EMPTY ? "0.00" : "9.50" }], checked_at: Date.now() });
 
 // ---------------------------------------------------------------- fake Musab server
-const S = { username: "admin", password: "admin", mustChange: true, version: 1, keys: [], usage: [],
+// fake GitHub repo seen by the fake server's /skills/discover
+const REPO = { repo: "acme/skills", ref: "main", skills: [
+  { path: "skills/postmortem/SKILL.md", name: "incident-postmortem", description: "Write a blameless post-incident report.", hasScripts: false,
+    body: "1. Summary of impact\n2. Timeline\n3. Root cause\n4. Actions" },
+  { path: "skills/pdf/SKILL.md", name: "pdf", description: "Work with PDF files.", hasScripts: true, body: "Run scripts/fill.py ..." },
+] };
+const S = { username: "admin", password: "admin", mustChange: true, version: 1, keys: [], usage: [], skills: [], githubToken: false,
   settings: { talk: "balanced", models: { work: "deepseek-v4-pro", friends: "deepseek-flash" }, fallback: true, activeKey: null } };
 const pub = (k) => ({ id: k.id, label: k.label, masked: `${k.key.slice(0, 3)}…${k.key.slice(-4)}`, status: k.status, balance: k.balance });
 let nextId = 1;
@@ -88,6 +98,29 @@ function serverApi(method, path, auth, body) {
     return [200, pub(k)];
   }
   if (path === "/usage") return [200, S.usage];
+  if (path === "/github-token") { S.githubToken = !!body.token; return [200, { githubToken: S.githubToken }]; }
+  if (path === "/skills" && method === "GET") return [200, S.skills];
+  if (path === "/skills" && method === "POST") {
+    const k = { id: `10000000-0000-0000-0000-0000000000${String(nextId++).padStart(2, "0")}`, name: body.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+      description: body.description, body: body.body, source: null, hasScripts: false };
+    S.skills.push(k); return [200, k];
+  }
+  if (path === "/skills/discover") {
+    if (!/github\.com\/acme\/skills/.test(body.url)) return [400, { error: "Repo not found." }];
+    return [200, { repo: REPO.repo, ref: REPO.ref, total: REPO.skills.length, truncated: false,
+      skills: REPO.skills.map(({ body: _b, ...k }) => k) }];
+  }
+  if (path === "/skills/import") {
+    const imported = body.paths.map((pth) => {
+      const f = REPO.skills.find((k) => k.path === pth);
+      const k = { id: `10000000-0000-0000-0000-0000000000${String(nextId++).padStart(2, "0")}`, name: f.name, description: f.description, body: f.body,
+        source: { repo: body.repo, ref: body.ref, path: pth }, hasScripts: body.scripts.includes(pth) };
+      S.skills.push(k); return k;
+    });
+    return [200, { imported, errors: [] }];
+  }
+  const sk = path.match(/^\/skills\/([0-9a-f-]{36})$/);
+  if (sk && method === "DELETE") { S.skills = S.skills.filter((k) => k.id !== sk[1]); return [200, { deleted: sk[1] }]; }
   if (path === "/chat") {
     const active = S.keys.find((k) => k.id === S.settings.activeKey) || S.keys[0];
     const bad = (k) => (k.status === "invalid" || k.status === "no-balance" ? 1 : 0);
@@ -199,7 +232,9 @@ try {
   check(await page.locator(".msg.mine .ticks").count() > 0 && await page.locator(".day").count() === 1, "WhatsApp-style ticks and day label");
   await shot("04-chat");
 
-  // @ mention picker
+  // @ mention picker (after the agents finish, so the screen isn't changing under the tap)
+  await page.waitForFunction(() => !document.querySelector(".appbar .subtitle.typing"), null, { timeout: 20000 });
+  await page.waitForTimeout(500);
   await page.fill("textarea", "");
   await page.type("textarea", "@ja");
   check(await page.locator(".mention-pop").isHidden(), "no picker when nobody matches");
@@ -238,6 +273,53 @@ try {
   const zuPrompt = calls.find((c) => c.name === "zu")?.body.messages[1].content || "";
   check(zuPrompt.includes("the file server is slow") && zuPrompt.includes("Check the System event log first."), "agents see the earlier chat, not just the new thread");
   check(!(await text()).includes("PASS"), "a reply starting with PASS is hidden");
+
+  // ---- skills: discover a GitHub repo in Admin, add them, write one, give one to an agent
+  await page.goto(APP + "#/admin");
+  await page.waitForSelector("#skill-repo");
+  await page.fill("#skill-repo", "https://github.com/nope/nothing");
+  await page.click("button:has-text('Discover')");
+  await page.waitForSelector("#skills .error:has-text('Repo not found')");
+  check(true, "unknown repo shows an error");
+  await page.fill("#skill-repo", "https://github.com/acme/skills");
+  await page.click("button:has-text('Discover')");
+  await page.waitForSelector("text=Found 2 skills");
+  check(await page.locator(".discover-results .tag-warn:has-text('uses scripts')").count() === 1, "skills with scripts are flagged");
+  await shot("09-skills-discover");
+  await page.click("button:has-text('Add 2 skills')");
+  await page.waitForSelector(".skill-row:has-text('incident-postmortem')");
+  check(await page.locator(".skill-row").count() === 2 && (await page.locator(".skill-row").first().innerText()).includes("GitHub · acme/skills"), "discovered skills added with their source");
+  await page.click("summary:has-text('Write your own skill')");
+  await page.fill("#new-skill-name", "Brainstorming");
+  await page.fill("#new-skill-desc", "Go wide, then pick 3.");
+  await page.fill("#new-skill-body", "1. 10 wild ideas\n2. Pick the best 3");
+  await page.click("button:has-text('Add skill')");
+  await page.waitForSelector(".skill-row:has-text('brainstorming')");
+  check(await page.locator(".skill-row").count() === 3, "own skill written");
+  await shot("10-skills-list");
+
+  await page.goto(APP + "#/team/it-ops");
+  await page.waitForSelector(".chat");
+  await page.click("[aria-label='Team info']");
+  await page.click("[aria-label='Edit skills of zu']");
+  await page.click(".skill-option:has-text('incident-postmortem') input");
+  await page.click(".skill-pick button:has-text('Save')");
+  await page.waitForSelector(".member-row:has-text('@zu') .skill-chip:has-text('incident-postmortem')");
+  check(true, "skill given to an agent in the team sheet");
+  await shot("11-agent-skills");
+  await page.click(".sheet-body .close-sheet");
+  calls.length = 0;
+  await page.fill("textarea", "@zu @charles write the postmortem for the outage");
+  await page.click("button.send");
+  await page.waitForSelector("text=Postmortem: timeline, root cause, actions.");
+  await waitCalls(() => calls.some((c) => c.name === "charles"));
+  const zuFirst = calls.find((c) => c.name === "zu");
+  check(zuFirst.body.messages[0].content.includes("- incident-postmortem: Write a blameless post-incident report.") &&
+    zuFirst.body.tools.some((t) => t.function.name === "use_skill"), "agent sees its skills and gets the use_skill tool");
+  const zuAfter = calls.filter((c) => c.name === "zu").pop();
+  check(zuAfter.body.messages.some((m) => m.role === "tool" && m.content.includes("3. Root cause")), "use_skill returns the full instructions");
+  check((await text()).includes("zu is using the skill “incident-postmortem”"), "chat shows when a skill is used");
+  check(!calls.find((c) => c.name === "charles").body.tools.some((t) => t.function.name === "use_skill"), "agents without skills don't get the tool");
 
   // home list
   await page.goto(APP);
