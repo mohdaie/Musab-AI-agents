@@ -40,24 +40,26 @@ You can override the model per agent with `model:` in its YAML, so you can mix t
 
 **Link:** https://mohdaie.github.io/Musab-AI-agents/ (live once this is on `main` and GitHub Pages is on, see below). Open it on your phone and install it: iPhone *Share → Add to Home Screen*, Android Chrome *Install app*.
 
-The app runs entirely in your browser. There is no server: your teams, chats and agent memory are saved on your device (IndexedDB), and the agents call the DeepSeek API directly.
+The app looks and works like a WhatsApp group chat. Your teams, chats and agent memory are saved on your device. The admin login, DeepSeek API keys, settings and usage are on a small server (a Supabase Edge Function), so they're the same on every device and survive app updates, and the keys never reach a phone.
 
-1. **Admin** (shield icon, or *Admin: API keys and usage* on the first screen). Sign in with **admin / admin**, then change it. Add your DeepSeek API key.
-2. **Create a team**: give it a name and pick *Team of engineers* or *Group of friends*.
-3. **How many agents**: 1 to 12.
-4. **Agent #1, #2, ...**: a name (their `@handle`), a designation (e.g. "Database administrator" or "The joker"), and what they're expert at or their personality. *Fill with examples* fills it in for you.
-5. **Chat room**: a message goes to everyone; tap a name (or start with `@name`) to talk to one agent. You can see who is typing and when agents talk to each other (`zu → @charles`).
+1. **Admin** (shield icon). Sign in with **admin / admin**; the server makes you set your own username and password before anything else. Add your DeepSeek API key.
+2. **New team** (green + button): a name, *Team of engineers* or *Group of friends*, how many agents (1 to 12), then a name, designation and expertise or personality for each.
+3. **Chat**: a message goes to the group; type `@` to pick one member. "jess is typing…" shows under the group name. Tap the group name to add or remove members, clear the chat or delete the team.
 
-Engineers stay in their own expertise and hand work to each other. Friends chat casually, stay in character and answer faster (`thinking: low`).
+Engineers stay in their own expertise and hand work to each other. Friends chat casually and stay in character.
 
 ### Admin page
 
-- **API keys.** Add as many DeepSeek keys as you like. Each one shows whether it works, its live balance from DeepSeek, and its requests, tokens and estimated cost for today and the last 30 days. Agents use the active key; if it is invalid or out of balance they move to the next one, and that key becomes active.
-- **Usage.** Requests, tokens in and out, and estimated cost for today, 7 days, 30 days or all time, a 14-day chart, and a breakdown by key and by team. The cost uses DeepSeek's published prices, including the cheaper off-peak hours; your real balance is on each key.
-- **Settings.** Model for all agents (V4 Pro or the cheaper V4.1 Flash), how many times agents can pass a thread between them, and a cap on agent replies per thread so long chains don't burn tokens.
-- **Login.** Change the username and password. *Forgot password?* resets it to admin / admin and, for safety, deletes the keys saved on that device.
+- **API keys.** Add as many DeepSeek keys as you like. Each shows whether it works, its live balance from DeepSeek, and its requests, tokens and estimated cost. Agents use the active key and move to the next if one is invalid or out of balance.
+- **Usage.** Requests, tokens and estimated cost for today, 7 days, 30 days or all time, a 14-day chart, and a breakdown by key, model and agent. Counted by the server for every device.
+- **Settings.**
+  - *How much agents talk*: **Brief** (the most relevant agent answers in 1–2 sentences, no thinking), **Balanced** (the 2 most relevant agents, short answers) or **Detailed** (everyone, in depth). Agents you @mention always answer.
+  - *Model for engineer teams* and *Model for friend groups*: Pro by default for engineers, Flash (about a third of the price) for friends.
+- **Login.** Change the username and password. Other devices then sign in again.
 
-**Good to know.** Keys, usage and the admin login are stored only in the browser where you enter them, and keys are only ever sent to `api.deepseek.com`. The login protects the admin screen on that device; it is not an account. Anyone else who opens the link gets their own empty app and needs their own key. To share one key across devices you would need a small backend (for example Supabase) to hold it.
+### Server
+
+`supabase/functions/musab/index.ts` is the server: login (bcrypt password, signed sessions, lockout after repeated wrong passwords), keys, settings, usage, and the DeepSeek relay. Its tables (`app_config`, `api_keys`, `usage`) have row level security with no policies, so only the function can read them. Deploy changes with `supabase functions deploy musab --no-verify-jwt` (the function checks its own sessions).
 
 ### Turning on the GitHub link
 
@@ -77,7 +79,7 @@ musab serve                 # then open http://localhost:8765
 npm i -g playwright && node tests/web/e2e.mjs
 ```
 
-This opens the app in a real browser with a fake DeepSeek and goes through admin login, keys, creating a team, chatting, key fallback and usage.
+This opens the app in a real browser with the server and DeepSeek faked, and goes through the forced password change, keys, settings, teams, chatting, models per team type, usage and members.
 
 ## Use (command line)
 

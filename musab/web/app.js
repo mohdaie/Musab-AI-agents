@@ -1,9 +1,11 @@
-/* Musab Agents PWA: create a team of agents, then chat with them. No framework, no server:
-   teams, chats and memory are stored in this browser and the agents call DeepSeek directly. */
+/* Musab Agents PWA: create a team of agents, then chat with them. No framework.
+   Teams, chats and agent memory are stored on this device; the admin login, API keys, settings and
+   usage are on the server, which also relays the agents' DeepSeek requests (server.js). */
 import { adminView } from "./admin.js";
-import { config, db } from "./db.js";
+import { db } from "./db.js";
 import { Engine, addMember, createTeam, removeMember } from "./engine.js";
-import { $app, $banner, $sheet, avatar, colorFor, fmtTime, h, icon, richText, toast } from "./ui.js";
+import { session, syncSettings } from "./server.js";
+import { $app, $banner, $sheet, appbar, avatar, colorFor, fmtTime, groupAvatar, h, icon, richText, toast } from "./ui.js";
 
 // ------------------------------------------------------------------ data (all on this device)
 const engine = new Engine();
@@ -15,15 +17,13 @@ async function teamsWithLast() {
 }
 
 function checkStatus() {
-  const noKey = !config.keys().length;
-  $banner.hidden = !noKey;
-  if (noKey) {
-    $banner.replaceChildren("Agents can't reply yet. ",
-      h("a", { href: "#/admin" }, "Open Admin"), " and add your DeepSeek API key.");
-  }
+  const msg = !session.signedIn() ? "Agents can't reply yet. Sign in to Admin on this device."
+    : session.mustChange() ? "Set your own admin password before the agents can reply." : "";
+  $banner.hidden = !msg || location.hash.startsWith("#/admin");
+  if (msg) $banner.replaceChildren(msg, " ", h("a", { href: "#/admin" }, "Open Admin"));
 }
-window.addEventListener("musab-config", checkStatus);
-window.addEventListener("storage", checkStatus);
+window.addEventListener("musab-session", checkStatus);
+window.addEventListener("hashchange", checkStatus);
 
 // ------------------------------------------------------------------ router
 let cleanup = null;
@@ -54,32 +54,32 @@ async function homeView(current) {
     return;
   }
   if (!current()) return;
-  const page = h("div", { class: "page" });
+  const adminBtn = h("button", { class: "icon-btn", "aria-label": "Admin", title: "Admin", html: icon("admin"), onclick: () => go("#/admin") });
+  const body = h("div", { class: "content list" });
   if (!teams.length) {
-    page.append(h("div", { class: "hero" },
+    body.append(h("div", { class: "hero" },
       h("img", { class: "logo", src: "icons/icon-192.png", alt: "" }),
       h("h2", {}, "Build your AI team"),
-      h("p", {}, "Pick how many agents you want, give each one a designation and what they're good at, then chat with all of them in one room. Make it a team of engineers or a group of friends."),
-      h("button", { class: "btn primary", onclick: () => go("#/new"), html: `${icon("plus")} Create a team` }),
-      h("p", { class: "hero-admin" }, h("a", { href: "#/admin", html: `${icon("admin")} Admin: API keys and usage` }))));
+      h("p", {}, "Pick how many agents you want, give each one a designation and what they're good at, then chat with all of them in one group. Make it a team of engineers or a group of friends."),
+      h("button", { class: "btn primary", onclick: () => go("#/new"), html: `${icon("plus")} Create a team` })));
   } else {
-    page.append(h("div", { class: "topbar" },
-      h("h1", {}, "Your teams"),
-      h("button", { class: "icon-btn", "aria-label": "Admin", title: "Admin", html: icon("admin"), onclick: () => go("#/admin") }),
-      h("button", { class: "btn primary", onclick: () => go("#/new"), html: `${icon("plus")} New team` })));
-    page.append(h("div", { class: "team-list" }, teams.map((t) => {
+    body.append(h("ul", { class: "chat-list" }, teams.map((t) => {
       const last = t.last_message;
-      const preview = last ? `${last.sender === "user" ? "You" : last.sender}: ${last.content}`
-        : t.agents.map((a) => `${a.name} (${a.role})`).join(", ");
-      return h("button", { class: "team-card", onclick: () => go(`#/team/${encodeURIComponent(t.id)}`) },
-        h("span", { class: "stack" }, t.agents.slice(0, 4).map((a) => avatar(a.name, "sm"))),
-        h("span", { class: "info" },
-          h("span", { class: "name" }, t.name, h("span", { class: "badge" }, t.style === "friends" ? "Friends" : "Engineers")),
-          h("span", { class: "preview" }, preview)),
-        last ? h("small", { class: "when" }, fmtTime(last.created_at)) : null);
+      const who = last ? (last.sender === "user" ? "You" : last.sender === "system" ? "" : last.sender) : "";
+      const preview = last ? `${who ? `${who}: ` : ""}${last.content}` : t.agents.map((a) => a.name).join(", ");
+      return h("li", {}, h("button", { class: "chat-row", onclick: () => go(`#/team/${encodeURIComponent(t.id)}`) },
+        groupAvatar(t, "lg"),
+        h("span", { class: "chat-row-main" },
+          h("span", { class: "chat-row-top" }, h("strong", {}, t.name), h("small", {}, last ? fmtTime(last.created_at) : "")),
+          h("span", { class: "chat-row-bottom" },
+            h("span", { class: "preview" }, preview),
+            h("span", { class: "tag" }, t.style === "friends" ? "Friends" : "Team")))));
     })));
   }
-  $app.replaceChildren(page);
+  $app.replaceChildren(h("div", { class: "screen" },
+    appbar({ title: "Musab Agents", actions: [adminBtn] }),
+    body,
+    h("button", { class: "fab", "aria-label": "New team", title: "New team", html: icon("plus"), onclick: () => go("#/new") })));
 }
 
 // ------------------------------------------------------------------ wizard
@@ -127,14 +127,13 @@ const wizard = {
   },
   render() {
     const s = this.state;
-    const page = h("div", { class: "page" });
-    page.append(h("div", { class: "topbar" },
-      h("button", { class: "icon-btn", "aria-label": "Back", html: icon("back"),
-        onclick: () => (s.step === 2 ? (s.step = 1, s.error = "", this.render()) : (this.state = null, go("#/"))) }),
-      h("h1", {}, s.step === 1 ? "Create a team" : "Your agents")));
+    const page = h("div", { class: "content" });
     page.append(h("div", { class: "steps" }, h("span", { class: "on" }), h("span", { class: s.step === 2 ? "on" : "" })));
     page.append(s.step === 1 ? this.step1() : this.step2());
-    $app.replaceChildren(page);
+    $app.replaceChildren(h("div", { class: "screen" },
+      appbar({ title: s.step === 1 ? "Create a team" : "Your agents", subtitle: `Step ${s.step} of 2`,
+        back: () => (s.step === 2 ? (s.step = 1, s.error = "", this.render()) : (this.state = null, go("#/"))) }),
+      page));
     const first = page.querySelector("input");
     if (first && !first.value && matchMedia("(hover: hover)").matches) first.focus();
   },
@@ -243,38 +242,42 @@ async function chatView(id, current) {
 
   const list = h("div", { class: "messages-inner" });
   const scroller = h("div", { class: "messages" }, list);
-  const typing = h("div", { class: "typing", "aria-live": "polite" });
-  const input = h("textarea", { rows: 1, maxlength: 8000, "aria-label": "Message",
-    placeholder: team.style === "friends" ? "Say something to the group…" : "Message the team, or start with @name" });
+  const input = h("textarea", { rows: 1, maxlength: 8000, "aria-label": "Message", placeholder: "Message" });
   const sendBtn = h("button", { class: "send", "aria-label": "Send", html: icon("send"), disabled: true });
-  const chips = {};
+  const memberNames = `${team.agents.map((a) => a.name).join(", ")}, You`;
+  const subtitle = h("small", { class: "subtitle" }, memberNames);
+  const bar = appbar({ title: team.name, subtitle: "", back: () => go("#/"), avatarEl: groupAvatar(team), onTitle: () => teamSheet(team),
+    actions: [h("button", { class: "icon-btn", "aria-label": "Team info", html: icon("more"), onclick: () => teamSheet(team) })] });
+  bar.querySelector(".appbar-text small").replaceWith(subtitle);
 
-  const insertMention = (n) => {
-    const rest = input.value.replace(/^(\s*@[\w-]+\s*)+/, "");
-    const current = (input.value.match(/@([\w-]+)/g) || []).map((m) => m.slice(1));
-    const list2 = current.includes(n) ? current.filter((x) => x !== n) : [...current, n];
-    input.value = (list2.length ? list2.map((x) => "@" + x).join(" ") + " " : "") + rest;
-    input.focus(); autosize(); sendBtn.disabled = !input.value.trim();
-  };
+  // Typing "@" shows the members to pick from, like mentions in a group chat.
+  const mentions = h("div", { class: "mention-pop", role: "listbox", hidden: true });
+  function mentionQuery() {
+    const before = input.value.slice(0, input.selectionStart);
+    const m = /(^|\s)@([\w-]*)$/.exec(before);
+    return m ? m[2].toLowerCase() : null;
+  }
+  function showMentions() {
+    const q = mentionQuery();
+    const hits = q == null ? [] : team.agents.filter((a) => a.name.startsWith(q));
+    mentions.hidden = !hits.length;
+    mentions.replaceChildren(...hits.map((a) => h("button", { type: "button", role: "option", class: "mention-item",
+      onmousedown: (e) => e.preventDefault(),
+      onclick: () => {
+        const pos = input.selectionStart, before = input.value.slice(0, pos).replace(/@[\w-]*$/, `@${a.name} `);
+        input.value = before + input.value.slice(pos);
+        input.setSelectionRange(before.length, before.length);
+        mentions.hidden = true; input.focus(); autosize(); sendBtn.disabled = !input.value.trim();
+      } }, avatar(a.name, "sm"), h("span", {}, h("strong", {}, a.name), h("small", {}, a.role)))));
+  }
 
-  const members = h("div", { class: "members", role: "toolbar", "aria-label": "Tap to mention" },
-    h("button", { class: "member-chip", onclick: () => { input.value = input.value.replace(/^(\s*@[\w-]+\s*)+/, ""); input.focus(); } },
-      h("span", { class: "avatar sm all", style: "--c:var(--accent)" }, "all"), "Everyone"),
-    team.agents.map((a) => (chips[a.name] = h("button", { class: "member-chip", title: a.role, onclick: () => insertMention(a.name) },
-      avatar(a.name, "sm"), a.name))));
-
-  const head = h("header", { class: "chat-head" },
-    h("button", { class: "icon-btn", "aria-label": "Back to teams", html: icon("back"), onclick: () => go("#/") }),
-    h("button", { class: "title", onclick: () => teamSheet(team) },
-      h("strong", {}, team.name),
-      h("small", {}, `${team.agents.length} ${team.style === "friends" ? "friends" : "agents"} · ${team.agents.map((a) => a.name).join(", ")}`)),
-    h("button", { class: "icon-btn", "aria-label": "Team info", html: icon("info"), onclick: () => teamSheet(team) }));
-
-  const form = h("form", { class: "composer" }, h("div", { class: "composer-inner" }, input, sendBtn));
-  $app.replaceChildren(h("div", { class: "chat" }, head, members, scroller, typing, form));
+  const form = h("form", { class: "composer" }, mentions, h("div", { class: "composer-inner" }, h("div", { class: "pill-input" }, input), sendBtn));
+  $app.replaceChildren(h("div", { class: "chat" }, bar, scroller, form));
 
   function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 140) + "px"; }
-  input.addEventListener("input", () => { autosize(); sendBtn.disabled = !input.value.trim(); });
+  input.addEventListener("input", () => { autosize(); sendBtn.disabled = !input.value.trim(); showMentions(); });
+  input.addEventListener("click", showMentions);
+  input.addEventListener("blur", () => setTimeout(() => (mentions.hidden = true), 150));
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing && matchMedia("(hover: hover)").matches) {
       e.preventDefault(); form.requestSubmit();
@@ -298,11 +301,19 @@ async function chatView(id, current) {
       : ["Introduce yourselves and what you're best at.", "Users say the file server is slow and can't log in. Where do we start?", "Review our backup plan for weak spots."];
     return h("div", { class: "empty-chat" },
       h("h3", {}, team.style === "friends" ? "Say hi to the group" : "Start the discussion"),
-      h("p", {}, "A message goes to everyone. Tap a name above to talk to one person."),
+      h("p", {}, "A message goes to the group. Type @ to talk to one person."),
       h("div", { class: "suggestions" }, ideas.map((t) => h("button", { onclick: () => {
         input.value = t; autosize(); sendBtn.disabled = false; input.focus();
       } }, t))));
   }
+
+  const dayLabel = (ts) => {
+    const d = new Date(ts * 1000), today = new Date(); today.setHours(0, 0, 0, 0);
+    const diff = Math.round((today - new Date(d).setHours(0, 0, 0, 0)) / 864e5);
+    return diff === 0 ? "Today" : diff === 1 ? "Yesterday" : d.toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" });
+  };
+  let lastDay = "";
+  const clock = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   function add(msgs) {
     msgs = msgs.filter((m) => m.id > lastId);
@@ -311,30 +322,35 @@ async function chatView(id, current) {
     if (!lastId) list.replaceChildren();
     for (const m of msgs) {
       lastId = m.id;
-      if (m.sender === "system") { list.append(h("div", { class: "sys" }, m.content)); prev = null; continue; }
+      const day = dayLabel(m.created_at);
+      if (day !== lastDay) { list.append(h("div", { class: "day" }, h("span", {}, day))); lastDay = day; prev = null; }
+      if (m.sender === "system") { list.append(h("div", { class: "sys" }, h("span", {}, m.content))); prev = null; continue; }
       const mine = m.sender === "user";
       const grouped = prev && prev.sender === m.sender && m.created_at - prev.created_at < 300;
       const to = m.recipients.filter((r) => r !== "all" && r !== "user" && r !== m.sender);
       const showTo = !mine ? to : m.recipients.filter((r) => r !== "all");
       const who = mine ? (showTo.length ? h("div", { class: "who" }, h("span", { class: "to" }, "to " + showTo.map((r) => "@" + r).join(" "))) : null)
         : grouped && !to.length ? null
-        : h("div", { class: "who" }, h("span", { style: `color:${colorFor(m.sender)}` }, m.sender),
-            roles[m.sender] && !grouped ? h("span", { class: "to" }, roles[m.sender]) : null,
+        : h("div", { class: "who" }, h("span", { class: "name", style: `color:${colorFor(m.sender)}` }, m.sender),
+            roles[m.sender] && !grouped ? h("span", { class: "to" }, `~ ${roles[m.sender]}`) : null,
             to.length ? h("span", { class: "to" }, "→ " + to.map((r) => "@" + r).join(" ")) : null);
-      list.append(h("div", { class: `msg ${mine ? "mine" : ""} ${grouped ? "cont" : "new-group"}` },
+      list.append(h("div", { class: `msg ${mine ? "mine" : ""} ${grouped ? "cont" : "first"}` },
         mine ? null : h("span", { class: "avatar-slot" }, grouped ? null : avatar(m.sender)),
         h("div", { class: "bubble" }, who,
           h("div", { class: "text", html: richText(m.content, names) }),
-          h("time", { datetime: new Date(m.created_at * 1000).toISOString() }, fmtTime(m.created_at)))));
+          h("span", { class: "meta" },
+            h("time", { datetime: new Date(m.created_at * 1000).toISOString() }, clock(m.created_at)),
+            mine ? h("span", { class: "ticks", "aria-label": "Sent", html: icon("check2") }) : null))));
       prev = m;
     }
     if (nearBottom || msgs.some((m) => m.sender === "user")) scroller.scrollTop = scroller.scrollHeight;
   }
 
+  // Like a group chat: "jess is typing…" replaces the member list under the group name.
   function setBusy(busy) {
-    for (const [n, c] of Object.entries(chips)) c.classList.toggle("busy", busy.includes(n));
-    typing.replaceChildren(...(busy.length ? [h("span", { class: "dots" }, h("span"), h("span"), h("span")), " ",
-      busy.length > 2 ? `${busy.length} are typing…` : `${busy.join(" and ")} ${busy.length > 1 ? "are" : "is"} typing…`] : []));
+    subtitle.classList.toggle("typing", busy.length > 0);
+    subtitle.textContent = busy.length > 2 ? `${busy.length} people are typing…`
+      : busy.length ? `${busy.join(" and ")} ${busy.length > 1 ? "are" : "is"} typing…` : memberNames;
   }
 
   async function poll(once = false) {
@@ -436,3 +452,4 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
 }
 checkStatus();
 route();
+syncSettings(); // pick up settings changed on another device
