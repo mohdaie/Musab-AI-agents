@@ -11,11 +11,11 @@ A team of independent AI agents running on the DeepSeek API. You can add as many
           Windows infra     DBA        AD expert      prompt, skills, memory
 ```
 
-- **Dynamic team.** One YAML file in `agents/` is one agent. Add a file while `musab run` is running and the new agent comes online within about 10 seconds.
-- **Own skillset.** Each agent loads only the skill files listed in its YAML (`skills/*.md`).
-- **Direct agent-to-agent talk.** An agent pulls another in by writing `@name` in its reply, or by calling the `send_message` tool. The other agent replies straight back to it.
-- **Persistent memory.** Each agent can `remember`, `recall` and `forget` facts, either private to itself or shared with the team. Memory is stored in SQLite with full-text search and survives restarts. The relevant memories are added to every prompt automatically.
-- **Loop guard.** Agent-to-agent chains stop after `MUSAB_MAX_HOPS` replies in a thread. An agent replies `PASS` when it has nothing to add.
+One YAML file in `agents/` is one agent. Add a file while `musab run` is running and the new agent comes online within about 10 seconds. Each agent loads only the skill files listed in its YAML (`skills/*.md`).
+
+An agent pulls another in by writing `@name` in its reply, or by calling the `send_message` tool, and the other agent replies straight back to it. Agent-to-agent chains stop after `MUSAB_MAX_HOPS` replies in a thread, and an agent replies `PASS` when it has nothing to add.
+
+Each agent can `remember`, `recall` and `forget` facts, either private to itself or shared with the team. Memory is stored in SQLite with full-text search, survives restarts, and the relevant memories are added to every prompt.
 
 ## Setup
 
@@ -38,7 +38,7 @@ You can override the model per agent with `model:` in its YAML, so you can mix t
 
 ## Web app (PWA)
 
-**Link:** https://mohdaie.github.io/Musab-AI-agents/ (live once this is on `main` and GitHub Pages is on, see below). Open it on your phone and install it: iPhone *Share → Add to Home Screen*, Android Chrome *Install app*.
+Link: https://mohdaie.github.io/Musab-AI-agents/. Open it on your phone and install it: iPhone *Share → Add to Home Screen*, Android Chrome *Install app*.
 
 The app looks and works like a WhatsApp group chat (dark and light). Your teams, chats and agent memory are saved on your device. The admin login, DeepSeek API keys, settings and usage are on a small server (a Supabase Edge Function), so they're the same on every device and survive app updates, and the keys never reach a phone.
 
@@ -51,7 +51,7 @@ Engineers stay in their own expertise and hand work to each other. Friends chat 
 ### Admin page
 
 - **API keys.** Add as many DeepSeek keys as you like. Each shows whether it works, its live balance from DeepSeek, and its requests, tokens and estimated cost. Agents use the active key and move to the next if one is invalid or out of balance.
-- **Usage.** Requests, tokens and estimated cost for today, 7 days, 30 days or all time, a 14-day chart, and a breakdown by key, model and agent. Counted by the server for every device.
+- **Usage.** Requests, tokens and estimated cost for today, 7 days, 30 days or all time, a 14-day chart, and a breakdown by key, model and agent. The server counts usage from every device, including web searches and Threads searches and posts.
 - **Settings.**
   - *Default talk level for new agents*. Each agent has its own level, **Light** (answers group messages only when it's the most relevant, 1–2 sentences, no thinking), **Balanced** (when among the 2 most relevant, a few sentences) or **Detailed** (always, in depth). Change it any time in the chat: tap the group name and pick the level under the member. Agents you @mention always answer.
   - *Model for engineer teams* and *Model for friend groups*: Pro by default for engineers, Flash (about a third of the price) for friends.
@@ -65,13 +65,11 @@ Engineers stay in their own expertise and hand work to each other. Friends chat 
 
 ### Server
 
-`supabase/functions/musab/index.ts` is the server: login (bcrypt password, signed sessions, lockout after repeated wrong passwords), keys, settings, usage, and the DeepSeek relay. Its tables (`app_config`, `api_keys`, `usage`) have row level security with no policies, so only the function can read them. Deploy changes with `supabase functions deploy musab --no-verify-jwt` (the function checks its own sessions).
+`supabase/functions/musab/index.ts` is the server: login (bcrypt password, signed sessions, lockout after repeated wrong passwords), keys, settings, usage, skills, and the DeepSeek relay. `github.ts` discovers skills in GitHub repos, `web.ts` calls Tavily, and `threads.ts` calls the Threads API. Its tables (`app_config`, `api_keys`, `usage`, `skills`) have row level security with no policies, so only the function can read them. Deploy changes with `supabase functions deploy musab --no-verify-jwt` (the function checks its own sessions).
 
-### Turning on the GitHub link
+### Publishing
 
-1. Merge this into `main`.
-2. In the repository: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-3. The *Deploy web app to GitHub Pages* workflow publishes `musab/web/` on every push to `main` that changes it (or run it by hand from the Actions tab).
+GitHub Pages is set to **Source: GitHub Actions** (Settings → Pages). The *Deploy web app to GitHub Pages* workflow publishes `musab/web/` on every push to `main` that changes it; you can also run it by hand from the Actions tab.
 
 ### Run it locally
 
@@ -88,7 +86,7 @@ node --experimental-strip-types tests/server/web.test.mjs        # web search an
 node --experimental-strip-types tests/server/threads.test.mjs    # Threads sign-in, search and posting, with the Threads API faked
 ```
 
-This opens the app in a real browser with the server and DeepSeek faked, and goes through the forced password change, keys, settings, teams, chatting, models per team type, usage and members.
+This opens the app in a real browser with the server and DeepSeek faked, and goes through the forced password change, keys, settings, teams, chatting, models per team type, talk levels, skills, web search, Threads drafts and posting, usage and members.
 
 ## Use (command line)
 
@@ -119,7 +117,7 @@ musab memory team --add "Change freeze on Fridays"
 musab run --only zu                            # run one agent per terminal/machine
 ```
 
-You can spread agents across separate terminals or machines. Every process just needs to point at the same `MUSAB_DB` file.
+You can spread agents across separate terminals or machines. Every process needs to point at the same `MUSAB_DB` file.
 
 ## Agent file
 

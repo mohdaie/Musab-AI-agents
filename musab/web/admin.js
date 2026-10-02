@@ -480,7 +480,7 @@ async function renderUsage(card, state) {
     table("By API key", groupBy(rows, "keyId"), (k) => keys[k] || "Removed key", true),
     table("By model", groupBy(rows, "model"), (k) => ({ "web-search": "Web searches", "web-read": "Pages read", "threads-search": "Threads searches", "threads-post": "Threads posts" }[k] || (MODELS[k] || k).replace(/ \(.*\)$/, "")), false),
     table("By agent", groupBy(rows, "agent"), (k) => (k ? `@${k}` : "Other"), false),
-    h("p", { class: "muted small" }, "Counted by the server for every device. Cost is estimated from DeepSeek's published prices, including peak and off-peak rates; your real balance is shown on each key."),
+    h("p", { class: "muted small" }, "The server counts usage from every device. Cost is estimated from DeepSeek's published prices, including peak and off-peak rates; your real balance is shown on each key."),
     h("button", { class: "link-btn small", onclick: async () => {
       if (!confirm("Clear the usage history on the server? Keys and chats stay.")) return;
       try { await api("/usage", { method: "DELETE" }); renderUsage(card, state); } catch (e) { toast(e.message); }
