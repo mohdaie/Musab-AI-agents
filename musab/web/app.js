@@ -3,7 +3,7 @@
    usage are on the server, which also relays the agents' DeepSeek requests (server.js). */
 import { adminView } from "./admin.js";
 import { db } from "./db.js";
-import { Engine, addMember, createTeam, removeMember } from "./engine.js";
+import { Engine, TALK, TALK_LEVELS, addMember, createTeam, removeMember, setAgentTalk } from "./engine.js";
 import { session, syncSettings } from "./server.js";
 import { $app, $banner, $sheet, appbar, avatar, colorFor, fmtTime, groupAvatar, h, icon, richText, toast } from "./ui.js";
 
@@ -63,24 +63,47 @@ async function homeView(current) {
       h("p", {}, "Pick how many agents you want, give each one a designation and what they're good at, then chat with all of them in one group. Make it a team of engineers or a group of friends."),
       h("button", { class: "btn primary", onclick: () => go("#/new"), html: `${icon("plus")} Create a team` })));
   } else {
-    body.append(h("ul", { class: "chat-list" }, teams.map((t) => {
-      const last = t.last_message;
-      const who = last ? (last.sender === "user" ? "You" : last.sender === "system" ? "" : last.sender) : "";
-      const preview = last ? `${who ? `${who}: ` : ""}${last.content}` : t.agents.map((a) => a.name).join(", ");
-      return h("li", {}, h("button", { class: "chat-row", onclick: () => go(`#/team/${encodeURIComponent(t.id)}`) },
-        groupAvatar(t, "lg"),
-        h("span", { class: "chat-row-main" },
-          h("span", { class: "chat-row-top" }, h("strong", {}, t.name), h("small", {}, last ? fmtTime(last.created_at) : "")),
-          h("span", { class: "chat-row-bottom" },
-            h("span", { class: "preview" }, preview),
-            h("span", { class: "tag" }, t.style === "friends" ? "Friends" : "Team")))));
-    })));
+    const list = h("ul", { class: "chat-list" });
+    const draw = (filter) => {
+      const shown = teams.filter((t) => filter === "all" || t.style === filter);
+      list.replaceChildren(...(shown.length ? shown.map((t) => {
+        const last = t.last_message;
+        const who = last ? (last.sender === "user" ? "You" : last.sender === "system" ? "" : last.sender) : "";
+        const preview = last ? `${who ? `${who}: ` : ""}${last.content}` : t.agents.map((a) => a.name).join(", ");
+        return h("li", {}, h("button", { class: "chat-row", onclick: () => go(`#/team/${encodeURIComponent(t.id)}`) },
+          groupAvatar(t, "lg"),
+          h("span", { class: "chat-row-main" },
+            h("span", { class: "chat-row-top" }, h("strong", {}, t.name), h("small", {}, last ? fmtTime(last.created_at) : "")),
+            h("span", { class: "chat-row-bottom" },
+              h("span", { class: "preview" }, preview),
+              h("span", { class: "tag" }, t.style === "friends" ? "Friends" : "Team")))));
+      }) : [h("li", { class: "list-empty" }, "Nothing here yet.")]));
+    };
+    const chips = [["all", "All"], ["work", "Teams"], ["friends", "Friends"]].map(([k, label]) =>
+      h("button", { "aria-pressed": String(k === "all"), onclick: (e) => {
+        chips.forEach((c) => c.setAttribute("aria-pressed", String(c === e.currentTarget))); draw(k);
+      } }, label));
+    draw("all");
+    body.append(h("div", { class: "filters" }, chips), list);
   }
   $app.replaceChildren(h("div", { class: "screen" },
-    appbar({ title: "Musab Agents", actions: [adminBtn] }),
+    appbar({ title: "Musab Agents", actions: [adminBtn], cls: "home" }),
     body,
     h("button", { class: "fab", "aria-label": "New team", title: "New team", html: icon("plus"), onclick: () => go("#/new") })));
 }
+
+/** Light / Balanced / Detailed switch for one agent. */
+function levelPicker(value, onchange, label = "How much this agent talks") {
+  const box = h("div", { class: "level", role: "radiogroup", "aria-label": label });
+  const hint = h("small", { class: "level-hint" }, TALK[value]?.desc || "");
+  const draw = (v) => {
+    box.replaceChildren(...TALK_LEVELS.map((k) => h("button", { type: "button", role: "radio", "aria-checked": String(k === v),
+      onclick: async () => { if (k === v) return; if ((await onchange(k)) !== false) { v = k; hint.textContent = TALK[k].desc; draw(k); } } }, TALK[k].label)));
+  };
+  draw(value);
+  return h("div", { class: "level-field" }, box, hint);
+}
+const defaultLevel = () => (TALK[session.settings().talk] ? session.settings().talk : "balanced");
 
 // ------------------------------------------------------------------ wizard
 const KINDS = {
@@ -121,7 +144,7 @@ const wizard = {
   },
   agentsFor(count) {
     const s = this.state, k = KINDS[s.style];
-    while (s.agents.length < count) s.agents.push({ name: "", role: "", about: "" });
+    while (s.agents.length < count) s.agents.push({ name: "", role: "", about: "", talk: defaultLevel() });
     s.agents.length = count;
     s.agents.forEach((a, i) => (a.placeholder = k.names[i % k.names.length] + (i >= k.names.length ? i + 1 : "")));
   },
@@ -188,13 +211,15 @@ const wizard = {
         h("div", { class: "field" },
           h("label", { for: id("about") }, s.style === "friends" ? "Personality" : "Expert at / characteristic"),
           h("textarea", { class: "textarea", id: id("about"), maxlength: 2000, placeholder: k.about,
-            oninput: (e) => (a.about = e.target.value) }, a.about)));
+            oninput: (e) => (a.about = e.target.value) }, a.about)),
+        h("div", { class: "field" }, h("span", { class: "label" }, "How much they talk"),
+          levelPicker(a.talk || defaultLevel(), (k) => { a.talk = k; })));
     });
     const err = h("p", { class: "error", hidden: !s.error }, s.error);
     const submit = h("button", { class: "btn primary", type: "submit" }, "Create team");
     return h("form", { onsubmit: async (e) => {
       e.preventDefault();
-      const agents = s.agents.map((a) => ({ name: a.name || a.placeholder, role: a.role.trim(), about: a.about.trim() }));
+      const agents = s.agents.map((a) => ({ name: a.name || a.placeholder, role: a.role.trim(), about: a.about.trim(), talk: a.talk }));
       const missing = agents.findIndex((a) => !a.role);
       if (missing >= 0) { s.error = `Agent #${missing + 1} needs a designation.`; }
       else if (new Set(agents.map((a) => a.name)).size !== agents.length) { s.error = "Each agent needs a different name."; }
@@ -383,7 +408,14 @@ async function chatView(id, current) {
   timer = setTimeout(poll, pollMs);
 }
 
-function teamSheet(team) {
+/** Open the team sheet with the team as it is saved now (levels and members may have changed). */
+async function teamSheet(team) {
+  let fresh = null;
+  try { fresh = await db.team(team.id); } catch {}
+  drawTeamSheet(fresh || team);
+}
+
+function drawTeamSheet(team) {
   const friends = team.style === "friends";
   const kind = KINDS[team.style];
   // Re-open the chat so the header, name chips and messages show the change, then the sheet again.
@@ -396,13 +428,14 @@ function teamSheet(team) {
       oninput: (e) => { e.target.value = e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ""); } });
     const role = h("input", { class: "input", id: "add-role", maxlength: 120, placeholder: kind.role, required: true });
     const about = h("textarea", { class: "textarea", id: "add-about", maxlength: 2000, placeholder: kind.about });
+    let level = defaultLevel();
     const err = h("p", { class: "error", hidden: true });
     const save = h("button", { class: "btn primary", type: "submit" }, "Add");
     return h("form", { class: "add-member", onsubmit: async (e) => {
       e.preventDefault();
       save.disabled = true;
       try {
-        await addMember(team.id, { name: name.value || placeholder, role: role.value, about: about.value });
+        await addMember(team.id, { name: name.value || placeholder, role: role.value, about: about.value, talk: level });
         refresh(`@${name.value || placeholder} joined`);
       } catch (ex) { err.textContent = ex.message; err.hidden = false; save.disabled = false; }
     } },
@@ -411,6 +444,7 @@ function teamSheet(team) {
         h("div", { class: "field" }, h("label", { for: "add-name" }, "Name"), h("div", { class: "handle" }, name)),
         h("div", { class: "field" }, h("label", { for: "add-role" }, "Designation"), role)),
       h("div", { class: "field" }, h("label", { for: "add-about" }, friends ? "Personality" : "Expert at / characteristic"), about),
+      h("div", { class: "field" }, h("span", { class: "label" }, "How much they talk"), levelPicker(level, (k) => { level = k; })),
       err,
       h("div", { class: "footer-actions" },
         h("button", { class: "btn", type: "button", onclick: () => form.replaceWith(addBtn) }, "Cancel"), save));
@@ -423,7 +457,11 @@ function teamSheet(team) {
     h("h2", {}, team.name),
     h("p", { class: "sub" }, `${friends ? "Group of friends" : "Team of engineers"} · ${team.agents.length} member${team.agents.length > 1 ? "s" : ""}`),
     team.agents.map((a) => h("div", { class: "member-row" }, avatar(a.name, "lg"),
-      h("div", { class: "member-info" }, h("strong", {}, "@" + a.name), h("div", { class: "role" }, a.role), a.persona ? h("p", {}, a.persona) : null),
+      h("div", { class: "member-info" }, h("strong", {}, "@" + a.name), h("div", { class: "role" }, a.role), a.persona ? h("p", {}, a.persona) : null,
+        levelPicker(a.talk || defaultLevel(), async (k) => {
+          try { await setAgentTalk(team.id, a.name, k); a.talk = k; toast(`@${a.name}: ${TALK[k].label}`); return true; }
+          catch (e) { toast(e.message); return false; }
+        }, `How much @${a.name} talks`)),
       h("button", { class: "btn small danger", "aria-label": `Remove ${a.name}`, disabled: team.agents.length <= 1,
         title: team.agents.length <= 1 ? "A team needs at least one member" : "", onclick: async () => {
           if (!confirm(`Remove @${a.name} from “${team.name}”? Their own memory is deleted; their old messages stay in the chat.`)) return;

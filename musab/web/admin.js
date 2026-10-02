@@ -287,9 +287,9 @@ function settingsCard(s) {
     h("span", {}, h("strong", {}, TALK[key].label), h("span", { class: "hint" }, TALK[key].desc)));
   return h("section", { class: "card" },
     h("div", { class: "card-head" }, h("h2", {}, "Settings")),
-    h("fieldset", { class: "field talk" }, h("legend", {}, "How much agents talk"),
+    h("fieldset", { class: "field talk" }, h("legend", {}, "Default talk level for new agents"),
       Object.keys(TALK).map(talkChoice),
-      h("span", { class: "hint" }, "The biggest saving. Agents you @mention always answer.")),
+      h("span", { class: "hint" }, "Each agent has its own level. Change it any time: open a chat, tap the group name, and pick Light, Balanced or Detailed under the member. Agents you @mention always answer.")),
     h("div", { class: "row" },
       h("div", { class: "field" }, h("label", { for: "set-model-work" }, "Model for engineer teams"), modelSelect("work", "set-model-work")),
       h("div", { class: "field" }, h("label", { for: "set-model-friends" }, "Model for friend groups"), modelSelect("friends", "set-model-friends"))),

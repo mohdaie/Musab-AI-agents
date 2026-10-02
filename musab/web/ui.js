@@ -80,20 +80,16 @@ ICONS.mic = '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 
 ICONS.check2 = '<path d="M2 13l4 4 8-9M10 15l2 2 8-9"/>';
 
 /** WhatsApp-style top bar: back arrow, optional avatar, title (+ subtitle), action buttons. */
-export function appbar({ title, subtitle = null, back = null, avatarEl = null, onTitle = null, actions = [] }) {
+export function appbar({ title, subtitle = null, back = null, avatarEl = null, onTitle = null, actions = [], cls = "" }) {
   const titleBox = h(onTitle ? "button" : "div", { class: "appbar-title", onclick: onTitle || null },
     avatarEl, h("span", { class: "appbar-text" }, h("strong", {}, title), subtitle != null ? h("small", {}, subtitle) : null));
-  return h("header", { class: "appbar" },
+  return h("header", { class: `appbar ${cls}` },
     back ? h("button", { class: "icon-btn", "aria-label": "Back", html: icon("back"), onclick: back }) : null,
     titleBox,
     h("div", { class: "appbar-actions" }, actions));
 }
 
-/** Group avatar: up to 3 member initials in a ring, or a group icon. */
+/** Group avatar: the people icon on a soft green circle, like a group without a photo. */
 export function groupAvatar(team, size = "") {
-  const a = h("span", { class: `group-avatar ${size}`, "aria-hidden": "true" });
-  const first = (team.name || "?").trim()[0] || "?";
-  a.textContent = first.toUpperCase();
-  a.style.setProperty("--c", colorFor(team.id || team.name || "?"));
-  return a;
+  return h("span", { class: `group-avatar ${size}`, "aria-hidden": "true", html: icon("group") });
 }

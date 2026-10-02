@@ -9,27 +9,30 @@ export const MODELS = {
   "deepseek-flash": "DeepSeek V4.1 Flash (cheaper, faster)",
 };
 
-/* How much the agents talk. This is the main lever on token use:
-   responders = how many agents answer a message sent to everyone (0 = all; @named agents always answer),
-   hops = how many times agents can pass a thread between them, maxReplies = agent replies per thread,
-   history = past messages each agent reads, thinking = reasoning effort (billed as output tokens). */
+/* How much each agent talks. Every member has their own level (agent.talk), changeable any time;
+   the Admin setting is only the default for new members. This is the main lever on token use:
+   responders = a message to the whole group reaches this agent only if it ranks in the top N most
+   relevant members (0 = always; @named agents always answer), hops = how far it passes a thread on,
+   maxReplies = agent replies per thread before it goes quiet, history = past messages it reads,
+   thinking = reasoning effort (billed as output tokens), maxTokens = reply cap. */
 export const TALK = {
-  brief: { label: "Brief", desc: "One agent answers, in 1–2 sentences. No thinking. Cheapest.",
+  brief: { label: "Light", desc: "Answers group messages only when most relevant, in 1–2 sentences. No thinking. Cheapest.",
     responders: 1, hops: 2, maxReplies: 5, history: 10, thinking: "off", maxTokens: 400,
-    style: "Answer in 1-2 short sentences. Only the most relevant member should speak; if your point is already made, answer PASS." },
-  balanced: { label: "Balanced", desc: "The 2 most relevant agents answer, briefly. Light thinking.",
+    style: "Answer in 1-2 short sentences. Only speak if you're the most relevant member; if your point is already made, answer PASS." },
+  balanced: { label: "Balanced", desc: "Answers when among the 2 most relevant, in a few sentences. Light thinking.",
     responders: 2, hops: 3, maxReplies: 10, history: 20, thinking: "low", maxTokens: 0,
     style: "Keep it short: 2-4 sentences or a short list. Don't repeat others; if you have nothing new, answer PASS." },
-  detailed: { label: "Detailed", desc: "Everyone answers and discusses in depth. Uses the most tokens.",
+  detailed: { label: "Detailed", desc: "Always answers, in depth, with full thinking. Uses the most tokens.",
     responders: 0, hops: 6, maxReplies: 20, history: 30, thinking: null, maxTokens: 0,
-    style: "Be concise." },
+    style: "Be thorough where it helps, but don't pad." },
 };
-export const talk = () => TALK[session.settings().talk] || TALK.balanced;
+export const TALK_LEVELS = Object.keys(TALK);
+/** An agent's level, falling back to the default from Admin. */
+export const talk = (agent) => TALK[agent?.talk] || TALK[session.settings().talk] || TALK.balanced;
 
 const STOP = new Set("the and for you are was what how why who can with this that have has our your they them from about will just not but any all".split(" "));
-/** For a message to everyone: the `n` members whose role/persona best match it, taking turns on ties. */
-export function pickResponders(agents, text, msgId, n) {
-  if (!n || n >= agents.length) return agents;
+/** Members ranked by how well their name/role/persona match the message, taking turns on ties; first `n`. */
+export function pickResponders(agents, text, msgId, n = agents.length) {
   const words = [...new Set((String(text).toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter((w) => w.length > 2 && !STOP.has(w)))];
   const len = agents.length;
   return agents
@@ -124,7 +127,19 @@ function makeAgent(a, i, style, seen) {
   if (!NAME_RE.test(n) || RESERVED.has(n)) throw new Error(`'${n}' can't be used as a name`);
   if (seen.has(n)) throw new Error(`Someone in the team is already called '${n}'`);
   seen.add(n);
-  return { name: n, role, persona, skills: style === "work" ? ["critical-review"] : [], thinking: style === "work" ? "high" : "low" };
+  const level = TALK[a.talk] ? a.talk : (TALK[session.settings().talk] ? session.settings().talk : "balanced");
+  return { name: n, role, persona, talk: level, skills: style === "work" ? ["critical-review"] : [], thinking: style === "work" ? "high" : "low" };
+}
+
+/** Change how much one member talks (Light / Balanced / Detailed). */
+export async function setAgentTalk(teamId, name, level) {
+  if (!TALK[level]) throw new Error("Unknown level");
+  const team = await db.team(teamId);
+  const agent = team?.agents.find((a) => a.name === name);
+  if (!agent) throw new Error(`No one called @${name} in this team`);
+  agent.talk = level;
+  await db.saveTeam(team);
+  return team;
 }
 
 export async function addMember(teamId, a) {
@@ -199,7 +214,7 @@ The human friend is "user".
 - Don't repeat what someone else already said. If you have nothing to add, answer exactly PASS (nothing is posted).
 
 ## Length
-${talk().style}
+${talk(agent).style}
 
 ## Things you remember (use remember/recall/forget tools to manage it)
 ${memory}
@@ -226,15 +241,15 @@ The human is "user".
 ${skills}
 
 ## Length
-${talk().style}
+${talk(agent).style}
 
 ## Your persistent memory (use remember/recall/forget tools to manage it)
 ${memory}
 `;
 }
 
-async function userPrompt(team, msg) {
-  const n = talk().history;
+async function userPrompt(team, agent, msg) {
+  const n = talk(agent).history;
   const history = (await db.thread(team.id, msg.thread_id, n + 1)).filter((m) => m.id < msg.id).slice(-n);
   const line = (m) => `[#${m.id}] ${m.sender} -> ${m.recipients.join(", ")}: ${m.content}`;
   return `Conversation so far (oldest first):\n${history.map(line).join("\n") || "(new thread)"}` +
@@ -274,14 +289,15 @@ export class Engine extends EventTarget {
   }
 
   deliver(team, msg) {
-    const t = talk();
     const roster = new Set(team.agents.map((a) => a.name));
-    // A message from the user to everyone: only the most relevant members answer (unless Detailed).
+    // A message from the user to everyone: each member answers only if it ranks high enough
+    // for its own level (Light: most relevant only, Balanced: top 2, Detailed: always).
     const toAll = msg.sender === "user" && msg.recipients.includes("all");
-    const chosen = toAll ? new Set(pickResponders(team.agents, msg.content, msg.id, t.responders).map((a) => a.name)) : null;
+    const rank = toAll ? pickResponders(team.agents, msg.content, msg.id, team.agents.length).map((a) => a.name) : [];
     for (const agent of team.agents) {
+      const t = talk(agent);
       if (!shouldReact(agent, msg, roster, t.hops)) continue;
-      if (chosen && !chosen.has(agent.name)) continue;
+      if (toAll && t.responders && rank.indexOf(agent.name) >= t.responders) continue;
       const key = `${team.id}/${agent.name}`;
       const tail = (this.queues.get(key) || Promise.resolve()).then(() => this.handle(team.id, agent.name, msg));
       this.queues.set(key, tail.catch(() => {}));
@@ -293,7 +309,7 @@ export class Engine extends EventTarget {
     const agent = team?.agents.find((a) => a.name === agentName);
     if (!agent) return null; // team deleted or member removed meanwhile
     const model = session.settings().models[team.style] || "deepseek-v4-pro";
-    const { maxReplies, thinking, maxTokens } = talk();
+    const { maxReplies, thinking, maxTokens } = talk(agent);
     const roster = new Set(team.agents.map((a) => a.name));
     if (await db.countThreadReplies(team.id, msg.thread_id, roster) >= maxReplies) return null;
 
@@ -303,7 +319,7 @@ export class Engine extends EventTarget {
     try {
       const messages = [
         { role: "system", content: await systemPrompt(team, agent, msg) },
-        { role: "user", content: await userPrompt(team, msg) },
+        { role: "user", content: await userPrompt(team, agent, msg) },
       ];
       let reply = "";
       let step = 0;

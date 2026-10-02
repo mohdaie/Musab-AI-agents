@@ -177,6 +177,8 @@ try {
   await page.fill("#team-name", "The Squad");
   await page.click("text=Next");
   await page.click("text=Fill with examples");
+  check(await page.locator(".agent-card .level [aria-checked=true]").first().innerText() === "Detailed", "new agents start at the Admin default level");
+  await page.click(".agent-card >> nth=2 >> .level button:has-text('Balanced')");
   await page.click("text=Create team");
   await page.waitForSelector(".chat");
   check(page.url().includes("#/team/the-squad"), "team saved and chat opened");
@@ -229,6 +231,9 @@ try {
   await page.goto(APP);
   await page.waitForSelector(".chat-row");
   check(await page.locator(".chat-row").count() === 2 && (await page.locator(".chat-row").first().innerText()).includes("IT Ops"), "chat list, newest first");
+  await page.click(".filters button:has-text('Friends')");
+  check(await page.locator(".chat-row").count() === 1 && (await page.locator(".chat-row").innerText()).includes("The Squad"), "Friends filter");
+  await page.click(".filters button:has-text('All')");
   await shot("06-home");
 
   // usage in admin
@@ -252,9 +257,6 @@ try {
   await page.waitForSelector("text=API keys");
   check(true, "new login works");
 
-  // Brief, chosen in Admin: only the most relevant agent answers, no thinking, short replies
-  await page.click(".talk-option:has-text('Brief')");
-  await page.waitForFunction(() => JSON.parse(localStorage.getItem("musab.serverSettings")).talk === "brief");
 
   // manage the team: add a member, remove one, clear the chat, delete the team
   await page.goto(APP + "#/team/the-squad");
@@ -271,6 +273,15 @@ try {
   await page.click("[aria-label='Remove danny']");
   await page.waitForSelector("text=@danny left the group.");
   check(!(await page.locator(".appbar .subtitle").innerText()).includes("danny"), "member removed from the chat");
+  await page.waitForSelector("dialog[open] .sub:has-text('3 members')");
+  check(await page.locator(".member-row:has-text('@danny')").count() === 0 &&
+    await page.locator(".member-row:has-text('@amir') .level [aria-checked=true]").innerText() === "Detailed", "members keep their own level");
+  // Set every member to Light from the team sheet: only the most relevant answers, no thinking, short
+  for (const n of ["amir", "jess", "nina"]) {
+    await page.click(`.member-row:has-text('@${n}') .level button:has-text('Light')`);
+    await page.waitForSelector(`.member-row:has-text('@${n}') .level [aria-checked=true]:has-text('Light')`);
+  }
+  await shot("07b-levels");
   await page.click(".sheet-body .close-sheet");
   calls.length = 0;
   await page.fill("textarea", "@nina hi!");
@@ -282,9 +293,22 @@ try {
   await page.click("button.send");
   await waitCalls(() => calls.length);
   await page.waitForTimeout(1500);
-  check(calls.length === 1 && calls[0].name === "amir", `Brief: only the most relevant agent answers (${calls.map((c) => c.name)})`);
+  check(calls.length === 1 && calls[0].name === "amir", `Light: only the most relevant agent answers (${calls.map((c) => c.name)})`);
   check(calls[0]?.body.thinking.type === "disabled" && calls[0]?.body.max_tokens === 400 && calls[0]?.body.messages[0].content.includes("1-2 short sentences"),
-    "Brief: no thinking, capped and short");
+    "Light: no thinking, capped and short");
+  // Per agent: jess back to Detailed answers a group message even when she isn't the most relevant
+  await page.click("[aria-label='Team info']");
+  await page.click(".member-row:has-text('@jess') .level button:has-text('Detailed')");
+  await page.waitForSelector(".member-row:has-text('@jess') .level [aria-checked=true]:has-text('Detailed')");
+  await page.click(".sheet-body .close-sheet");
+  calls.length = 0;
+  await page.fill("textarea", "Anyone up for football tonight?");
+  await page.click("button.send");
+  await waitCalls(() => calls.length >= 2);
+  await page.waitForTimeout(1500);
+  check(new Set(calls.map((c) => c.name)).has("jess") && new Set(calls.map((c) => c.name)).has("amir") && !calls.some((c) => c.name === "nina"),
+    `levels are per agent: Detailed jess and most-relevant amir answer, Light nina doesn't (${calls.map((c) => c.name)})`);
+  check(calls.find((c) => c.name === "jess")?.body.thinking.type === "enabled" && !calls.find((c) => c.name === "jess")?.body.max_tokens, "Detailed agent thinks and isn't capped");
 
   await page.click("[aria-label='Team info']");
   await page.click(".sheet-body button:has-text('Clear chat')");
