@@ -52,6 +52,17 @@ export async function api(path, { method = "GET", body } = {}) {
   return data;
 }
 
+/** Skills (from Admin → Skills), cached on this device so agents can use them. */
+export const skills = {
+  all() { try { return JSON.parse(read("musab.skills") || "[]") || []; } catch { return []; } },
+  cache(list) { write("musab.skills", JSON.stringify(list)); emit(); },
+  byId(id) { return this.all().find((s) => s.id === id) || null; },
+};
+export async function syncSkills() {
+  if (!session.signedIn() || session.mustChange()) return null;
+  try { const list = await api("/skills"); skills.cache(list); return list; } catch { return null; }
+}
+
 /** Refresh the cached settings (talk level, models) from the server when signed in. */
 export async function syncSettings() {
   if (!session.signedIn()) return null;
@@ -59,6 +70,7 @@ export async function syncSettings() {
     const me = await api("/me");
     session.set(session.token(), me.mustChange);
     session.cacheSettings(me.settings || {});
+    await syncSkills();
     return me;
   } catch { return null; }
 }

@@ -3,8 +3,8 @@
    usage are on the server, which also relays the agents' DeepSeek requests (server.js). */
 import { adminView } from "./admin.js";
 import { db } from "./db.js";
-import { Engine, TALK, TALK_LEVELS, addMember, createTeam, removeMember, setAgentTalk } from "./engine.js";
-import { session, syncSettings } from "./server.js";
+import { Engine, TALK, TALK_LEVELS, addMember, createTeam, removeMember, setAgentSkills, setAgentTalk, setAgentWeb } from "./engine.js";
+import { session, skills, syncSettings, syncSkills } from "./server.js";
 import { $app, $banner, $sheet, appbar, avatar, colorFor, fmtTime, groupAvatar, h, icon, richText, toast } from "./ui.js";
 
 // ------------------------------------------------------------------ data (all on this device)
@@ -103,6 +103,53 @@ function levelPicker(value, onchange, label = "How much this agent talks") {
   draw(value);
   return h("div", { class: "level-field" }, box, hint);
 }
+/** A member's skills: chips, and a checklist of every skill from Admin → Skills to change them. */
+function skillsPicker(team, a) {
+  const box = h("div", { class: "skills-field" });
+  const view = () => {
+    const mine = (a.skillIds || []).map((id) => skills.byId(id)).filter(Boolean);
+    box.replaceChildren(
+      h("div", { class: "skill-chips" },
+        h("span", { class: "label-sm" }, "Skills"),
+        mine.length ? mine.map((k) => h("span", { class: "skill-chip", title: k.description }, k.name)) : h("span", { class: "muted small" }, "none"),
+        h("button", { type: "button", class: "link-btn small", "aria-label": `Edit skills of ${a.name}`, onclick: edit }, mine.length ? "Edit" : "Add")));
+  };
+  const edit = async () => {
+    await syncSkills();
+    const all = skills.all();
+    if (!all.length) {
+      box.replaceChildren(h("p", { class: "muted small" }, "No skills yet. Add them in ", h("a", { href: "#/admin" }, "Admin → Skills"), ", from a GitHub repo or your own."));
+      return;
+    }
+    const chosen = new Set(a.skillIds || []);
+    box.replaceChildren(h("div", { class: "skill-pick" },
+      all.map((k) => h("label", { class: "skill-option" },
+        h("input", { type: "checkbox", checked: chosen.has(k.id), onchange: (e) => (e.target.checked ? chosen.add(k.id) : chosen.delete(k.id)) }),
+        h("span", {}, h("strong", {}, k.name), h("small", {}, k.description || "")))),
+      h("div", { class: "footer-actions" },
+        h("button", { type: "button", class: "btn small", onclick: view }, "Cancel"),
+        h("button", { type: "button", class: "btn small primary", onclick: async () => {
+          try { await setAgentSkills(team.id, a.name, [...chosen]); a.skillIds = [...chosen]; toast(`@${a.name}: ${chosen.size} skill${chosen.size === 1 ? "" : "s"}`); view(); }
+          catch (e) { toast(e.message); }
+        } }, "Save"))));
+  };
+  view();
+  return box;
+}
+
+/** "Can browse the web" switch for one member (needs a Tavily key in Admin → Web search). */
+function webToggle(team, a) {
+  const ready = !!session.settings().webSearch;
+  return h("label", { class: "switch web-toggle" },
+    h("span", {}, h("strong", {}, "Can browse the web"),
+      h("span", { class: "hint" }, ready ? "Search and read pages when it needs current facts." : "Set up web search in Admin first.")),
+    h("input", { type: "checkbox", checked: !!a.web, disabled: !ready && !a.web, "aria-label": `@${a.name} can browse the web`,
+      onchange: async (e) => {
+        try { await setAgentWeb(team.id, a.name, e.target.checked); a.web = e.target.checked; toast(`@${a.name}: web ${a.web ? "on" : "off"}`); }
+        catch (ex) { e.target.checked = !e.target.checked; toast(ex.message); }
+      } }));
+}
+
 const defaultLevel = () => (TALK[session.settings().talk] ? session.settings().talk : "balanced");
 
 // ------------------------------------------------------------------ wizard
@@ -461,7 +508,9 @@ function drawTeamSheet(team) {
         levelPicker(a.talk || defaultLevel(), async (k) => {
           try { await setAgentTalk(team.id, a.name, k); a.talk = k; toast(`@${a.name}: ${TALK[k].label}`); return true; }
           catch (e) { toast(e.message); return false; }
-        }, `How much @${a.name} talks`)),
+        }, `How much @${a.name} talks`),
+        skillsPicker(team, a),
+        webToggle(team, a)),
       h("button", { class: "btn small danger", "aria-label": `Remove ${a.name}`, disabled: team.agents.length <= 1,
         title: team.agents.length <= 1 ? "A team needs at least one member" : "", onclick: async () => {
           if (!confirm(`Remove @${a.name} from “${team.name}”? Their own memory is deleted; their old messages stay in the chat.`)) return;

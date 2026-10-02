@@ -51,7 +51,25 @@ function deepseek(key, body) {
   }
   if (name === "jess") return msg({ content: "Ramen at Jalan Alor! @amir you coming?" });
   if (name === "amir") return msg({ content: last.content.includes("hop 1") ? "Only if there's pineapple pizza after 🍍" : "PASS" });
+  if (name === "zu" && /postmortem/.test(last.content) && last.role === "user") {
+    return msg({ content: "", tool_calls: [{ id: "s1", type: "function", function: { name: "use_skill", arguments: JSON.stringify({ name: "incident-postmortem" }) } }] });
+  }
+  if (name === "zu" && last.role === "tool" && /# Skill: incident-postmortem/.test(last.content)) return msg({ content: "Postmortem: timeline, root cause, actions." });
   if (name === "zu" && /compile/.test(last.content)) return msg({ content: "Checklist: 1. System event log" });
+  // mike browses: search, then read the first result, then answer citing it
+  if (name === "mike" && /latest/.test(last.content) && last.role === "user") {
+    return msg({ content: "", tool_calls: [{ id: "w1", type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: "kerberos hardening 2026" }) } }] });
+  }
+  if (name === "mike" && last.role === "tool" && /learn\.example\.com\/kb1/.test(last.content) && !/Page:/.test(last.content)) {
+    return msg({ content: "", tool_calls: [{ id: "w2", type: "function", function: { name: "read_page", arguments: JSON.stringify({ url: "https://learn.example.com/kb1" }) } }] });
+  }
+  if (name === "mike" && last.role === "tool" && /Page: https:\/\/learn\.example\.com\/kb1/.test(last.content)) return msg({ content: "Per learn.example.com: enforce AES." });
+  // charles tries to search forever: the 4th call hits the per-reply limit
+  if (name === "charles" && /search a lot/.test(body.messages[1].content)) {
+    const n = body.messages.filter((m) => m.role === "tool").length;
+    if (n < 4) return msg({ content: "", tool_calls: [{ id: `c${n}`, type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: `q${n}` }) } }] });
+    return msg({ content: "Done searching." });
+  }
   if (name === "zu") return msg({ content: "Check the System event log first." });
   if (name === "charles") return msg({ content: "PASS — nothing to add from the database side." });
   return msg({ content: "PASS" });
@@ -59,7 +77,13 @@ function deepseek(key, body) {
 const balanceOf = (key) => (key === BAD ? null : { available: key !== EMPTY, infos: [{ currency: "USD", total_balance: key === EMPTY ? "0.00" : "9.50" }], checked_at: Date.now() });
 
 // ---------------------------------------------------------------- fake Musab server
-const S = { username: "admin", password: "admin", mustChange: true, version: 1, keys: [], usage: [],
+// fake GitHub repo seen by the fake server's /skills/discover
+const REPO = { repo: "acme/skills", ref: "main", skills: [
+  { path: "skills/postmortem/SKILL.md", name: "incident-postmortem", description: "Write a blameless post-incident report.", hasScripts: false,
+    body: "1. Summary of impact\n2. Timeline\n3. Root cause\n4. Actions" },
+  { path: "skills/pdf/SKILL.md", name: "pdf", description: "Work with PDF files.", hasScripts: true, body: "Run scripts/fill.py ..." },
+] };
+const S = { username: "admin", password: "admin", mustChange: true, version: 1, keys: [], usage: [], skills: [], githubToken: false, web: false, webCalls: [],
   settings: { talk: "balanced", models: { work: "deepseek-v4-pro", friends: "deepseek-flash" }, fallback: true, activeKey: null } };
 const pub = (k) => ({ id: k.id, label: k.label, masked: `${k.key.slice(0, 3)}…${k.key.slice(-4)}`, status: k.status, balance: k.balance });
 let nextId = 1;
@@ -71,8 +95,8 @@ function serverApi(method, path, auth, body) {
   if (auth !== `t${S.version}`) return [401, { error: "Sign in again" }];
   if (S.mustChange && !(path === "/login/change" || (method === "GET" && (path === "/me" || path === "/admin"))))
     return [403, { error: "Change the default password first." }];
-  if (path === "/me") return [200, { username: S.username, mustChange: S.mustChange, settings: S.settings }];
-  if (path === "/admin") return [200, { username: S.username, mustChange: S.mustChange, settings: S.settings, keys: S.keys.map(pub) }];
+  if (path === "/me") return [200, { username: S.username, mustChange: S.mustChange, settings: { ...S.settings, webSearch: S.web } }];
+  if (path === "/admin") return [200, { username: S.username, mustChange: S.mustChange, settings: S.settings, keys: S.keys.map(pub), webSearch: S.web }];
   if (path === "/login/change") {
     if (body.password.length < 8) return [400, { error: "Use at least 8 characters for the password." }];
     Object.assign(S, { username: body.username, password: body.password, mustChange: false, version: S.version + 1 });
@@ -88,6 +112,36 @@ function serverApi(method, path, auth, body) {
     return [200, pub(k)];
   }
   if (path === "/usage") return [200, S.usage];
+  if (path === "/web-key") {
+    if (body.key && !body.key.startsWith("tvly-")) return [400, { error: "That doesn't look like a Tavily key (it starts with tvly-)." }];
+    S.web = !!body.key; return [200, { webSearch: S.web }];
+  }
+  if (path === "/web/search") { S.webCalls.push(["search", body.query, body.meta.agent]);
+    return [200, { results: [{ title: "Kerberos hardening", url: "https://learn.example.com/kb1", content: "Enforce AES for Kerberos." }] }]; }
+  if (path === "/web/read") { S.webCalls.push(["read", body.url, body.meta.agent]); return [200, { url: body.url, content: "# KB1\nEnforce AES." }]; }
+  if (path === "/github-token") { S.githubToken = !!body.token; return [200, { githubToken: S.githubToken }]; }
+  if (path === "/skills" && method === "GET") return [200, S.skills];
+  if (path === "/skills" && method === "POST") {
+    const k = { id: `10000000-0000-0000-0000-0000000000${String(nextId++).padStart(2, "0")}`, name: body.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+      description: body.description, body: body.body, source: null, hasScripts: false };
+    S.skills.push(k); return [200, k];
+  }
+  if (path === "/skills/discover") {
+    if (!/github\.com\/acme\/skills/.test(body.url)) return [400, { error: "Repo not found." }];
+    return [200, { repo: REPO.repo, ref: REPO.ref, total: REPO.skills.length, truncated: false,
+      skills: REPO.skills.map(({ body: _b, ...k }) => k) }];
+  }
+  if (path === "/skills/import") {
+    const imported = body.paths.map((pth) => {
+      const f = REPO.skills.find((k) => k.path === pth);
+      const k = { id: `10000000-0000-0000-0000-0000000000${String(nextId++).padStart(2, "0")}`, name: f.name, description: f.description, body: f.body,
+        source: { repo: body.repo, ref: body.ref, path: pth }, hasScripts: body.scripts.includes(pth) };
+      S.skills.push(k); return k;
+    });
+    return [200, { imported, errors: [] }];
+  }
+  const sk = path.match(/^\/skills\/([0-9a-f-]{36})$/);
+  if (sk && method === "DELETE") { S.skills = S.skills.filter((k) => k.id !== sk[1]); return [200, { deleted: sk[1] }]; }
   if (path === "/chat") {
     const active = S.keys.find((k) => k.id === S.settings.activeKey) || S.keys[0];
     const bad = (k) => (k.status === "invalid" || k.status === "no-balance" ? 1 : 0);
@@ -129,6 +183,13 @@ page.on("pageerror", (e) => errors.push(String(e)));
 page.on("console", (m) => m.type() === "error" && !/status of 40[0-3]/.test(m.text()) && errors.push(m.text()));
 page.on("dialog", (d) => d.accept());
 const shot = async (n) => SHOTS && page.screenshot({ path: `${SHOTS}/${n}.png`, fullPage: true });
+// Phone-sized screenshot with `sel` scrolled to the top (only when SHOTS is set).
+const ui = async (n, sel) => {
+  if (!SHOTS) return;
+  if (sel) await page.locator(sel).first().evaluate((e) => e.scrollIntoView({ block: "start" }));
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: `${SHOTS}/${n}.png` });
+};
 let failures = 0;
 const check = (ok, what) => { console.log(`${ok ? "ok  " : "FAIL"} ${what}`); if (!ok) failures++; };
 const text = () => page.locator("body").innerText();
@@ -199,7 +260,9 @@ try {
   check(await page.locator(".msg.mine .ticks").count() > 0 && await page.locator(".day").count() === 1, "WhatsApp-style ticks and day label");
   await shot("04-chat");
 
-  // @ mention picker
+  // @ mention picker (after the agents finish, so the screen isn't changing under the tap)
+  await page.waitForFunction(() => !document.querySelector(".appbar .subtitle.typing"), null, { timeout: 20000 });
+  await page.waitForTimeout(500);
   await page.fill("textarea", "");
   await page.type("textarea", "@ja");
   check(await page.locator(".mention-pop").isHidden(), "no picker when nobody matches");
@@ -238,6 +301,98 @@ try {
   const zuPrompt = calls.find((c) => c.name === "zu")?.body.messages[1].content || "";
   check(zuPrompt.includes("the file server is slow") && zuPrompt.includes("Check the System event log first."), "agents see the earlier chat, not just the new thread");
   check(!(await text()).includes("PASS"), "a reply starting with PASS is hidden");
+
+  // ---- skills: discover a GitHub repo in Admin, add them, write one, give one to an agent
+  await page.goto(APP + "#/admin");
+  await page.waitForSelector("#skill-repo");
+  await page.fill("#skill-repo", "https://github.com/nope/nothing");
+  await page.click("button:has-text('Discover')");
+  await page.waitForSelector("#skills .error:has-text('Repo not found')");
+  check(true, "unknown repo shows an error");
+  await page.fill("#skill-repo", "https://github.com/acme/skills");
+  await page.click("button:has-text('Discover')");
+  await page.waitForSelector("text=Found 2 skills");
+  check(await page.locator(".discover-results .tag-warn:has-text('uses scripts')").count() === 1, "skills with scripts are flagged");
+  await shot("09-skills-discover");
+  await page.click("button:has-text('Add 2 skills')");
+  await page.waitForSelector(".skill-row:has-text('incident-postmortem')");
+  check(await page.locator(".skill-row").count() === 2 && (await page.locator(".skill-row").first().innerText()).includes("GitHub · acme/skills"), "discovered skills added with their source");
+  await page.click("summary:has-text('Write your own skill')");
+  await page.fill("#new-skill-name", "Brainstorming");
+  await page.fill("#new-skill-desc", "Go wide, then pick 3.");
+  await page.fill("#new-skill-body", "1. 10 wild ideas\n2. Pick the best 3");
+  await page.click("button:has-text('Add skill')");
+  await page.waitForSelector(".skill-row:has-text('brainstorming')");
+  check(await page.locator(".skill-row").count() === 3, "own skill written");
+  await shot("10-skills-list");
+
+  await page.goto(APP + "#/team/it-ops");
+  await page.waitForSelector(".chat");
+  await page.click("[aria-label='Team info']");
+  await page.click("[aria-label='Edit skills of zu']");
+  await page.click(".skill-option:has-text('incident-postmortem') input");
+  await page.click(".skill-pick button:has-text('Save')");
+  await page.waitForSelector(".member-row:has-text('@zu') .skill-chip:has-text('incident-postmortem')");
+  check(true, "skill given to an agent in the team sheet");
+  await shot("11-agent-skills");
+  await page.click(".sheet-body .close-sheet");
+  calls.length = 0;
+  await page.fill("textarea", "@zu @charles write the postmortem for the outage");
+  await page.click("button.send");
+  await page.waitForSelector("text=Postmortem: timeline, root cause, actions.");
+  await waitCalls(() => calls.some((c) => c.name === "charles"));
+  const zuFirst = calls.find((c) => c.name === "zu");
+  check(zuFirst.body.messages[0].content.includes("- incident-postmortem: Write a blameless post-incident report.") &&
+    zuFirst.body.tools.some((t) => t.function.name === "use_skill"), "agent sees its skills and gets the use_skill tool");
+  const zuAfter = calls.filter((c) => c.name === "zu").pop();
+  check(zuAfter.body.messages.some((m) => m.role === "tool" && m.content.includes("3. Root cause")), "use_skill returns the full instructions");
+  check((await text()).includes("zu is using the skill “incident-postmortem”"), "chat shows when a skill is used");
+  check(!calls.find((c) => c.name === "charles").body.tools.some((t) => t.function.name === "use_skill"), "agents without skills don't get the tool");
+
+  // ---- web search: key in Admin, switch on per agent, agent searches + reads, limit per reply
+  await page.click("[aria-label='Team info']");
+  check(await page.locator(".member-row:has-text('@mike') .web-toggle input").isDisabled(), "web switch is off until web search is set up");
+  await page.goto(APP + "#/admin");
+  await page.waitForSelector("#tavily-key");
+  await page.fill("#tavily-key", "wrong-key");
+  await page.click("#web button:has-text('Save')");
+  await page.waitForSelector("#web .error:has-text('Tavily key')");
+  await page.fill("#tavily-key", "tvly-test-key-123456");
+  await page.click("#web button:has-text('Save')");
+  await page.waitForSelector("#web .pill:has-text('On')");
+  check(true, "Tavily key saved, web search on");
+  await ui("7-web-admin", "#web");
+  await page.click(".talk-option:has-text('Balanced')"); // saving a setting must keep web search on
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem("musab.serverSettings")).talk === "balanced");
+  check(await page.evaluate(() => JSON.parse(localStorage.getItem("musab.serverSettings")).webSearch) === true, "saving settings keeps web search on");
+  await page.goto(APP + "#/team/it-ops");
+  await page.waitForSelector(".chat");
+  await page.click("[aria-label='Team info']");
+  for (const n of ["mike", "charles"]) {
+    await page.click(`.member-row:has-text('@${n}') .web-toggle input`);
+    await page.waitForFunction((n) => [...document.querySelectorAll(".member-row")].find((r) => r.textContent.includes("@" + n))?.querySelector(".web-toggle input").checked, n);
+  }
+  await ui("8-web-toggle", ".member-row:has-text('@mike')");
+  await page.click(".sheet-body .close-sheet");
+  calls.length = 0;
+  await page.fill("textarea", "@mike what is the latest guidance?");
+  await page.click("button.send");
+  await page.waitForSelector("text=Per learn.example.com: enforce AES.");
+  const mikeFirst = calls.find((c) => c.name === "mike");
+  check(mikeFirst.body.tools.some((t) => t.function.name === "web_search") && mikeFirst.body.messages[0].content.includes("## Web access"), "browsing agent gets the web tools");
+  check(S.webCalls.some(([k, v, a]) => k === "search" && v === "kerberos hardening 2026" && a === "mike") &&
+    S.webCalls.some(([k, v]) => k === "read" && v === "https://learn.example.com/kb1"), "search and page read go through the server");
+  const t2 = await text();
+  check(t2.includes("mike searched the web: “kerberos hardening 2026”") && t2.includes("mike is reading learn.example.com"), "chat shows searches and pages read");
+  await page.waitForTimeout(400);
+  await ui("9-web-chat");
+  calls.length = 0; S.webCalls.length = 0;
+  await page.fill("textarea", "@charles search a lot please");
+  await page.click("button.send");
+  await page.waitForSelector("text=Done searching.");
+  check(S.webCalls.length === 3, `at most 3 web calls per reply (${S.webCalls.length})`);
+  const zuNow = calls.find((c) => c.name === "zu");
+  check(!zuNow || !zuNow.body.tools.some((t) => t.function.name === "web_search"), "agents without web access don't get the tools");
 
   // home list
   await page.goto(APP);

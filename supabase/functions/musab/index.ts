@@ -2,6 +2,8 @@
 // Keys never leave the server; the web app sends chat requests here with its session token.
 // Tables (RLS on, no policies) are only reachable with the service role this function runs with.
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { discover, fetchSkill, GitHubError, parseSkillMd } from "./github.ts";
+import { read as readPage, search as webSearch, WebError } from "./web.ts";
 
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
   auth: { persistSession: false },
@@ -155,6 +157,26 @@ function cleanSettings(p: any) {
   return out;
 }
 
+// ------------------------------------------------------------------ skills
+const publicSkill = (k: any) => ({ id: k.id, name: k.name, description: k.description, body: k.body,
+  source: k.source_repo ? { repo: k.source_repo, ref: k.source_ref, path: k.source_path } : null,
+  hasScripts: k.has_scripts, updatedAt: k.updated_at });
+function cleanSkill(b: any) {
+  const p = parseSkillMd(`---\nname: ${String(b.name || "").replace(/\n/g, " ")}\n---\n`, "skill");
+  return { name: p.name, description: String(b.description || "").replace(/\s+/g, " ").trim().slice(0, 1024),
+    body: String(b.body || "").trim().slice(0, 60_000) };
+}
+async function insertSkill(row: any) {
+  // Names are unique: "brainstorm", then "brainstorm-2", ...
+  for (let n = 1; n < 50; n++) {
+    const name = n === 1 ? row.name : `${row.name}-${n}`;
+    const { data, error } = await sb.from("skills").insert({ ...row, name }).select().single();
+    if (!error) return data;
+    if (error.code !== "23505" || /source_repo/.test(error.message)) throw new HttpError(400, error.message);
+  }
+  throw new HttpError(400, "Too many skills with that name.");
+}
+
 // ------------------------------------------------------------------ routes
 async function route(req: Request): Promise<Response> {
   const url = new URL(req.url);
@@ -184,7 +206,8 @@ async function route(req: Request): Promise<Response> {
     throw new HttpError(403, "Change the default password first.");
 
   if (m === "POST" && path === "/chat") return json(req, 200, await chat(req, cfg));
-  if (m === "GET" && path === "/me") return json(req, 200, { username: cfg.username, mustChange: cfg.must_change, settings: cfg.settings });
+  if (m === "GET" && path === "/me") return json(req, 200, { username: cfg.username, mustChange: cfg.must_change,
+    settings: { ...cfg.settings, webSearch: !!cfg.tavily_key } });
 
   if (m === "POST" && path === "/login/change") {
     const { username = "", password = "" } = await req.json();
@@ -198,7 +221,101 @@ async function route(req: Request): Promise<Response> {
 
   if (m === "GET" && path === "/admin") {
     const { data } = await sb.from("api_keys").select("*").order("created_at");
-    return json(req, 200, { username: cfg.username, mustChange: cfg.must_change, settings: cfg.settings, keys: (data || []).map(publicKey) });
+    return json(req, 200, { username: cfg.username, mustChange: cfg.must_change, settings: cfg.settings,
+      keys: (data || []).map(publicKey), githubToken: !!cfg.github_token, webSearch: !!cfg.tavily_key });
+  }
+
+  // ---------------------------------------------------------------- web search (Tavily)
+  if (m === "POST" && path === "/web-key") {
+    const { key = "" } = await req.json();
+    const k = String(key).trim();
+    if (k) {
+      if (!/^tvly-[\w-]{10,}$/.test(k)) throw new HttpError(400, "That doesn't look like a Tavily key (it starts with tvly-).");
+      try { await webSearch(k, "test"); } catch (e) { throw new HttpError(400, (e as Error).message); } // one credit, proves the key works
+    }
+    await sb.from("app_config").update({ tavily_key: k || null }).eq("id", 1);
+    return json(req, 200, { webSearch: !!k });
+  }
+  if (m === "POST" && (path === "/web/search" || path === "/web/read")) {
+    if (!cfg.tavily_key) throw new HttpError(409, "Web search isn't set up. Add a Tavily key in Admin → Web search.");
+    const b = await req.json();
+    const meta = { team: String(b.meta?.team || "").slice(0, 80), agent: String(b.meta?.agent || "").slice(0, 40) };
+    const t0 = Date.now();
+    const kind = path === "/web/search" ? "web-search" : "web-read";
+    try {
+      const out = kind === "web-search" ? { results: await webSearch(cfg.tavily_key, b.query) } : await readPage(cfg.tavily_key, b.url);
+      await sb.from("usage").insert({ model: kind, ...meta, ok: true, status: 200, ms: Date.now() - t0 });
+      return json(req, 200, out);
+    } catch (e) {
+      await sb.from("usage").insert({ model: kind, ...meta, ok: false, status: 400, ms: Date.now() - t0, error: String((e as Error).message).slice(0, 200) });
+      if (e instanceof WebError) throw new HttpError(400, e.message);
+      throw e;
+    }
+  }
+  if (m === "POST" && path === "/github-token") {
+    const { token = "" } = await req.json();
+    const t = String(token).trim();
+    if (t && !/^[\w-]{20,255}$/.test(t)) throw new HttpError(400, "That doesn't look like a GitHub token.");
+    await sb.from("app_config").update({ github_token: t || null }).eq("id", 1);
+    return json(req, 200, { githubToken: !!t });
+  }
+
+  // ---------------------------------------------------------------- skills
+  if (path === "/skills" && m === "GET") {
+    const { data } = await sb.from("skills").select("*").order("name");
+    return json(req, 200, (data || []).map(publicSkill));
+  }
+  if (path === "/skills" && m === "POST") { // write your own
+    const b = await req.json();
+    const s = cleanSkill(b);
+    if (!s.body) throw new HttpError(400, "Write the skill's instructions.");
+    return json(req, 200, publicSkill(await insertSkill(s)));
+  }
+  if (path === "/skills/discover" && m === "POST") {
+    const { url = "" } = await req.json();
+    try { return json(req, 200, await discover(String(url), { token: cfg.github_token || undefined })); }
+    catch (e) { if (e instanceof GitHubError) throw new HttpError(400, e.message); throw e; }
+  }
+  if (path === "/skills/import" && m === "POST") {
+    const { repo = "", ref = "main", paths = [], scripts = [] } = await req.json();
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !Array.isArray(paths) || !paths.length) throw new HttpError(400, "Nothing to import.");
+    const out: any[] = [], errors: string[] = [];
+    for (const pth of paths.slice(0, 150)) {
+      try {
+        const s = await fetchSkill(repo, String(ref), String(pth), { token: cfg.github_token || undefined });
+        const { data: existing } = await sb.from("skills").select("id").eq("source_repo", repo).eq("source_path", pth).maybeSingle();
+        const row = { ...s, source_repo: repo, source_ref: String(ref), source_path: String(pth), has_scripts: Array.isArray(scripts) && scripts.includes(pth), updated_at: new Date().toISOString() };
+        if (existing) {
+          const { data } = await sb.from("skills").update({ description: row.description, body: row.body, source_ref: row.source_ref, updated_at: row.updated_at }).eq("id", existing.id).select().single();
+          out.push(publicSkill(data));
+        } else out.push(publicSkill(await insertSkill(row)));
+      } catch (e) { errors.push(`${pth}: ${(e as Error).message}`); }
+    }
+    return json(req, 200, { imported: out, errors });
+  }
+  if (path === "/skills/update" && m === "POST") { // pull the latest version of every imported skill
+    const { data } = await sb.from("skills").select("*").not("source_repo", "is", null);
+    let updated = 0; const errors: string[] = [];
+    for (const k of data || []) {
+      try {
+        const s = await fetchSkill(k.source_repo, k.source_ref || "main", k.source_path, { token: cfg.github_token || undefined });
+        if (s.body !== k.body || s.description !== k.description) {
+          await sb.from("skills").update({ body: s.body, description: s.description, updated_at: new Date().toISOString() }).eq("id", k.id);
+          updated++;
+        }
+      } catch (e) { errors.push(`${k.name}: ${(e as Error).message}`); }
+    }
+    return json(req, 200, { checked: (data || []).length, updated, errors });
+  }
+  const sm = path.match(/^\/skills\/([0-9a-f-]{36})$/);
+  if (sm) {
+    if (m === "DELETE") { await sb.from("skills").delete().eq("id", sm[1]); return json(req, 200, { deleted: sm[1] }); }
+    if (m === "POST") {
+      const s = cleanSkill(await req.json());
+      const { data, error } = await sb.from("skills").update({ ...s, updated_at: new Date().toISOString() }).eq("id", sm[1]).select().single();
+      if (error) throw new HttpError(400, error.code === "23505" ? "Another skill already has that name." : error.message);
+      return json(req, 200, publicSkill(data));
+    }
   }
   if (m === "POST" && path === "/settings") {
     return json(req, 200, await saveSettings(cfg, cleanSettings(await req.json())));

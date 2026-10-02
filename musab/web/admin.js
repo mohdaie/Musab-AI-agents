@@ -1,8 +1,8 @@
 /* Admin: sign in, DeepSeek API keys, usage and cost per key, settings.
    All of it is stored on the server (server.js), so it is the same on every device and survives updates. */
 import { MODELS, TALK } from "./engine.js";
-import { api, session } from "./server.js";
-import { $app, appbar, h, icon, toast } from "./ui.js";
+import { api, session, skills as skillCache } from "./server.js";
+import { $app, $sheet, appbar, h, icon, toast } from "./ui.js";
 
 const PERIODS = { today: "Today", d7: "7 days", d30: "30 days", all: "All time" };
 let period = "d7";
@@ -80,7 +80,7 @@ async function dashboard(go, current, setCleanup) {
   }
   if (!current()) return;
   session.set(session.token(), state.mustChange);
-  session.cacheSettings(state.settings);
+  session.cacheSettings({ ...state.settings, webSearch: !!state.webSearch });
   const reload = () => { if (current()) dashboard(go, current, setCleanup); };
   const signOut = h("button", { class: "icon-btn", "aria-label": "Sign out", title: "Sign out", html: icon("logout"),
     onclick: () => { session.signOut(); go("#/"); toast("Signed out on this device"); } });
@@ -92,13 +92,16 @@ async function dashboard(go, current, setCleanup) {
   }
   const keysCard = h("section", { class: "card" });
   const usageCard = h("section", { class: "card" });
+  const skillsCard = h("section", { class: "card", id: "skills" });
+  const webCard = webSearchCard(state, reload);
   $app.replaceChildren(screen(bar,
     localKeysCard(reload),
-    keysCard, usageCard, settingsCard(state.settings),
+    keysCard, skillsCard, webCard, usageCard, settingsCard(state.settings),
     loginCard(false, state.username, reload),
     h("p", { class: "note" }, "Keys are stored on your server (Supabase) and only the server talks to DeepSeek, so keys never reach a phone. " +
       "Settings and usage are the same on every device you sign in on.")));
   renderKeys(keysCard, state, reload);
+  renderSkills(skillsCard, state);
   await renderUsage(usageCard, state);
 }
 
@@ -197,6 +200,168 @@ function fillKeyUsage(card, rows) {
   }
 }
 
+// ------------------------------------------------------------------ web search
+function webSearchCard(state, reload) {
+  const key = h("input", { class: "input mono", id: "tavily-key", type: "password", autocomplete: "off", spellcheck: "false",
+    placeholder: state.webSearch ? "Saved. Paste a new key to replace" : "tvly-…" });
+  const err = h("p", { class: "error", hidden: true });
+  const save = h("button", { class: "btn primary", type: "submit" }, "Save");
+  return h("section", { class: "card", id: "web" },
+    h("div", { class: "card-head" }, h("h2", {}, "Web search"), h("span", { class: `pill ${state.webSearch ? "ok" : ""}` }, state.webSearch ? "On" : "Off")),
+    h("p", { class: "muted small" }, "Lets agents you choose search the web and read pages for current or exact facts. Read-only: they can't post or change anything. Uses ",
+      h("a", { href: "https://app.tavily.com", target: "_blank", rel: "noopener" }, "Tavily"), ": free for 1,000 searches a month, no card needed."),
+    h("form", { onsubmit: async (e) => {
+      e.preventDefault();
+      err.hidden = true; save.disabled = true; save.textContent = "Checking…";
+      try {
+        const r = await api("/web-key", { method: "POST", body: { key: key.value.trim() } });
+        toast(r.webSearch ? "Web search is on. Turn it on per agent in the team sheet." : "Web search key removed");
+        reload();
+      } catch (ex) { err.textContent = ex.message; err.hidden = false; save.disabled = false; save.textContent = "Save"; }
+    } },
+      h("div", { class: "field" }, h("label", { for: "tavily-key" }, "Tavily API key"), h("div", { class: "input-group" }, key, save)),
+      err,
+      state.webSearch ? h("button", { type: "button", class: "link-btn small danger-text", onclick: async () => {
+        if (!confirm("Remove the Tavily key? Agents stop browsing the web.")) return;
+        try { await api("/web-key", { method: "POST", body: { key: "" } }); toast("Web search turned off"); reload(); } catch (e) { toast(e.message); }
+      } }, "Remove key") : null),
+    h("p", { class: "muted small" }, "Then in a chat: tap the group name and switch on ", h("strong", {}, "Can browse the web"),
+      " for the agents who need it. Each agent can do at most 3 searches or page reads per reply. Every search shows in the chat, and Usage counts them."));
+}
+
+// ------------------------------------------------------------------ skills
+async function renderSkills(card, state) {
+  const head = h("div", { class: "card-head" }, h("h2", {}, "Skills"));
+  card.replaceChildren(head, h("div", { class: "spinner" }));
+  let list;
+  try { list = await api("/skills"); skillCache.cache(list); }
+  catch (e) { card.replaceChildren(head, h("p", { class: "error" }, e.message)); return; }
+  const redraw = () => renderSkills(card, state);
+  head.append(h("span", { class: "pill" }, `${list.length} skill${list.length === 1 ? "" : "s"}`));
+
+  // ---- add from GitHub: paste a repo, discover every SKILL.md, tick which to add
+  const url = h("input", { class: "input", id: "skill-repo", placeholder: "https://github.com/owner/repo", autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
+  const err = h("p", { class: "error", hidden: true });
+  const results = h("div", { hidden: true });
+  const findBtn = h("button", { class: "btn primary", type: "submit" }, "Discover");
+  const discover = h("form", { class: "discover", onsubmit: async (e) => {
+    e.preventDefault();
+    err.hidden = true; results.hidden = true; findBtn.disabled = true; findBtn.textContent = "Searching…";
+    try { showFound(await api("/skills/discover", { method: "POST", body: { url: url.value.trim() } })); }
+    catch (ex) { err.textContent = ex.message; err.hidden = false; }
+    findBtn.disabled = false; findBtn.textContent = "Discover";
+  } },
+    h("h3", {}, "Add from GitHub"),
+    h("p", { class: "muted small" }, "Paste a repo (or a folder in one). Every folder with a SKILL.md is a skill."),
+    h("div", { class: "input-group" }, url, findBtn), err, results);
+
+  const have = new Set(list.filter((k) => k.source).map((k) => `${k.source.repo}/${k.source.path}`));
+  function showFound(r) {
+    const picks = new Set(r.skills.filter((k) => !have.has(`${r.repo}/${k.path}`)).map((k) => k.path));
+    const count = h("span", {});
+    const addBtn = h("button", { class: "btn primary", type: "button" });
+    const sync = () => { count.textContent = `${picks.size} selected`; addBtn.textContent = `Add ${picks.size} skill${picks.size === 1 ? "" : "s"}`; addBtn.disabled = !picks.size; };
+    const boxes = [];
+    const all = h("input", { type: "checkbox", checked: picks.size === r.skills.length, onchange: (e) => {
+      boxes.forEach(([cb, path]) => { cb.checked = e.target.checked; e.target.checked ? picks.add(path) : picks.delete(path); }); sync();
+    } });
+    const rows = r.skills.map((k) => {
+      const added = have.has(`${r.repo}/${k.path}`);
+      const cb = h("input", { type: "checkbox", checked: picks.has(k.path), onchange: (e) => { e.target.checked ? picks.add(k.path) : picks.delete(k.path); sync(); } });
+      boxes.push([cb, k.path]);
+      return h("label", { class: "skill-option" }, cb,
+        h("span", {}, h("strong", {}, k.name, added ? h("span", { class: "tag-warn" }, "already added, will update") : null,
+          k.hasScripts ? h("span", { class: "tag-warn", title: "This skill has scripts. Agents can't run them; they follow the written instructions only." }, "uses scripts") : null),
+          h("small", {}, k.description || "(no description)"), h("small", { class: "src" }, k.path)));
+    });
+    addBtn.onclick = async () => {
+      addBtn.disabled = true; addBtn.textContent = "Adding…";
+      const chosen = r.skills.filter((k) => picks.has(k.path));
+      try {
+        const res = await api("/skills/import", { method: "POST", body: { repo: r.repo, ref: r.ref, paths: chosen.map((k) => k.path), scripts: chosen.filter((k) => k.hasScripts).map((k) => k.path) } });
+        toast(`Added ${res.imported.length} skill${res.imported.length === 1 ? "" : "s"}${res.errors.length ? `, ${res.errors.length} failed` : ""}`);
+        if (res.errors.length) console.warn(res.errors);
+        redraw();
+      } catch (ex) { toast(ex.message); sync(); }
+    };
+    sync();
+    results.replaceChildren(
+      h("p", { class: "small" }, h("strong", {}, `Found ${r.total} skill${r.total === 1 ? "" : "s"}`), ` in ${r.repo} (${r.ref})`,
+        r.truncated ? h("span", { class: "muted" }, ` · showing the first ${r.skills.length}`) : null),
+      h("label", { class: "skill-option" }, all, h("span", {}, h("strong", {}, "Select all"), count)),
+      h("div", { class: "discover-results" }, rows),
+      addBtn);
+    results.hidden = false;
+  }
+
+  // ---- the skills you have
+  const rows = list.map((k) => h("div", { class: "skill-row" },
+    h("div", { class: "main" },
+      h("strong", {}, k.name, k.hasScripts ? h("span", { class: "tag-warn" }, "uses scripts") : null),
+      h("small", {}, k.description || "(no description)"),
+      h("span", { class: "src" }, k.source ? `GitHub · ${k.source.repo} · ${k.source.path}` : "Written by you")),
+    h("button", { class: "btn small", onclick: () => editSkill(k, redraw) }, "Edit"),
+    h("button", { class: "btn small danger", "aria-label": `Delete ${k.name}`, onclick: async () => {
+      if (!confirm(`Delete the skill “${k.name}”? Agents that have it stop using it.`)) return;
+      try { await api(`/skills/${k.id}`, { method: "DELETE" }); toast("Skill deleted"); redraw(); } catch (e) { toast(e.message); }
+    } }, "Delete")));
+  const updateBtn = list.some((k) => k.source) ? h("button", { class: "btn small", html: `${icon("refresh")} Check GitHub for updates`, onclick: async () => {
+    updateBtn.disabled = true;
+    try { const r = await api("/skills/update", { method: "POST" }); toast(`${r.updated} of ${r.checked} skills updated${r.errors.length ? `, ${r.errors.length} failed` : ""}`); redraw(); }
+    catch (e) { toast(e.message); updateBtn.disabled = false; }
+  } }) : null;
+
+  // ---- write your own
+  const nName = h("input", { class: "input", id: "new-skill-name", maxlength: 64, placeholder: "e.g. brainstorming", autocomplete: "off" });
+  const nDesc = h("input", { class: "input", id: "new-skill-desc", maxlength: 300, placeholder: "When to use it, in one line" });
+  const nBody = h("textarea", { class: "textarea skill-body", id: "new-skill-body", placeholder: "The instructions. Steps, checklists, rules, templates…" });
+  const write = h("details", { class: "write" }, h("summary", {}, "Write your own skill"),
+    h("form", { onsubmit: async (e) => {
+      e.preventDefault();
+      try { await api("/skills", { method: "POST", body: { name: nName.value, description: nDesc.value, body: nBody.value } }); toast("Skill added"); redraw(); }
+      catch (ex) { toast(ex.message); }
+    } },
+      h("div", { class: "field" }, h("label", { for: "new-skill-name" }, "Name"), nName),
+      h("div", { class: "field" }, h("label", { for: "new-skill-desc" }, "Description"), nDesc),
+      h("div", { class: "field" }, h("label", { for: "new-skill-body" }, "Instructions"), nBody),
+      h("button", { class: "btn primary", type: "submit" }, "Add skill")));
+
+  // ---- GitHub token (optional)
+  const tok = h("input", { class: "input mono", id: "gh-token", type: "password", autocomplete: "off", placeholder: state.githubToken ? "Saved. Paste a new one to replace" : "github_pat_…" });
+  const token = h("details", { class: "write" }, h("summary", {}, `GitHub token (optional)${state.githubToken ? " · saved" : ""}`),
+    h("p", { class: "muted small" }, "Only needed for private repos, or if GitHub limits anonymous requests. A read-only token is enough. Stored on your server only."),
+    h("form", { class: "input-group", onsubmit: async (e) => {
+      e.preventDefault();
+      try { const r = await api("/github-token", { method: "POST", body: { token: tok.value } }); state.githubToken = r.githubToken; toast(r.githubToken ? "GitHub token saved" : "GitHub token removed"); redraw(); }
+      catch (ex) { toast(ex.message); }
+    } }, tok, h("button", { class: "btn", type: "submit" }, "Save")));
+
+  card.replaceChildren(head,
+    h("p", { class: "muted small" }, "Give agents skills in a chat: tap the group name, then Skills under a member. Agents see each skill's name and description, and open the full instructions only when they need them."),
+    list.length ? h("div", { class: "skill-list" }, rows) : h("p", { class: "muted" }, "No skills yet."),
+    updateBtn, discover, write, token);
+}
+
+function editSkill(k, done) {
+  const name = h("input", { class: "input", id: "edit-skill-name", maxlength: 64, value: k.name });
+  const desc = h("input", { class: "input", id: "edit-skill-desc", maxlength: 1024, value: k.description || "" });
+  const body = h("textarea", { class: "textarea skill-body", id: "edit-skill-body" }, k.body || "");
+  $sheet.replaceChildren(h("form", { class: "sheet-body", onsubmit: async (e) => {
+    e.preventDefault();
+    try { await api(`/skills/${k.id}`, { method: "POST", body: { name: name.value, description: desc.value, body: body.value } }); $sheet.close(); toast("Skill saved"); done(); }
+    catch (ex) { toast(ex.message); }
+  } },
+    h("h2", {}, "Edit skill"),
+    k.source ? h("p", { class: "sub" }, `From ${k.source.repo}. "Check GitHub for updates" would replace your edits with the latest version.`) : null,
+    h("div", { class: "field" }, h("label", { for: "edit-skill-name" }, "Name"), name),
+    h("div", { class: "field" }, h("label", { for: "edit-skill-desc" }, "Description"), desc),
+    h("div", { class: "field" }, h("label", { for: "edit-skill-body" }, "Instructions"), body),
+    h("div", { class: "footer-actions" },
+      h("button", { class: "btn", type: "button", onclick: () => $sheet.close() }, "Cancel"),
+      h("button", { class: "btn primary", type: "submit" }, "Save"))));
+  $sheet.showModal();
+}
+
 // ------------------------------------------------------------------ usage
 async function renderUsage(card, state) {
   card.replaceChildren(h("div", { class: "card-head" }, h("h2", {}, "Usage")), h("div", { class: "spinner" }));
@@ -231,7 +396,7 @@ async function renderUsage(card, state) {
     dailyChart(all),
     rows.length ? null : h("p", { class: "muted" }, "No requests in this period yet."),
     table("By API key", groupBy(rows, "keyId"), (k) => keys[k] || "Removed key", true),
-    table("By model", groupBy(rows, "model"), (k) => (MODELS[k] || k).replace(/ \(.*\)$/, ""), false),
+    table("By model", groupBy(rows, "model"), (k) => ({ "web-search": "Web searches", "web-read": "Pages read" }[k] || (MODELS[k] || k).replace(/ \(.*\)$/, "")), false),
     table("By agent", groupBy(rows, "agent"), (k) => (k ? `@${k}` : "Other"), false),
     h("p", { class: "muted small" }, "Counted by the server for every device. Cost is estimated from DeepSeek's published prices, including peak and off-peak rates; your real balance is shown on each key."),
     h("button", { class: "link-btn small", onclick: async () => {
@@ -277,7 +442,12 @@ function dailyChart(rows) {
 // ------------------------------------------------------------------ settings
 function settingsCard(s) {
   const save = async (patch) => {
-    try { const next = await api("/settings", { method: "POST", body: patch }); Object.assign(s, next); session.cacheSettings(next); toast("Saved"); }
+    try {
+      const next = await api("/settings", { method: "POST", body: patch });
+      Object.assign(s, next);
+      session.cacheSettings({ ...next, webSearch: session.settings().webSearch }); // not part of /settings
+      toast("Saved");
+    }
     catch (e) { toast(e.message); }
   };
   const modelSelect = (style, id) => h("select", { class: "input", id, onchange: (e) => save({ models: { ...s.models, [style]: e.target.value } }) },

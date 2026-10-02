@@ -2,7 +2,7 @@
    every agent decides for itself whether to react, has its own prompt, skills and memory,
    pulls others in with @name, and agent-to-agent chains stop at the hop limit. */
 import { db } from "./db.js";
-import { api, session } from "./server.js";
+import { api, session, skills } from "./server.js";
 
 export const MODELS = {
   "deepseek-v4-pro": "DeepSeek V4 Pro (strongest)",
@@ -81,6 +81,40 @@ const TOOLS = [
     parameters: { type: "object", properties: {} } } },
 ];
 const SHARED = "_shared";
+// Only offered to agents that have skills from Admin → Skills: they see names + descriptions,
+// and open a skill's full instructions with this tool when it fits the task.
+const USE_SKILL = { type: "function", function: {
+  name: "use_skill",
+  description: "Open one of your skills to read its full instructions. Do this before a task the skill covers.",
+  parameters: { type: "object", properties: { name: { type: "string", description: "The skill's name" } }, required: ["name"] } } };
+// Only for members with "Can browse the web" on, when a Tavily key is set in Admin.
+const WEB_TOOLS = [
+  { type: "function", function: {
+    name: "web_search",
+    description: "Search the web. Returns up to 5 results with title, link and a short excerpt.",
+    parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } },
+  { type: "function", function: {
+    name: "read_page",
+    description: "Read one web page (for example a result from web_search) as text.",
+    parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } } },
+];
+const MAX_WEB_CALLS = 3; // per reply, so a curious agent can't run up the bill
+const canBrowse = (agent) => !!agent.web && !!session.settings().webSearch;
+const webSection = (agent) => (canBrowse(agent) ? `
+## Web access
+You can search the web (web_search) and read a page (read_page). Use them only when you need current or exact facts
+you aren't sure of, at most ${MAX_WEB_CALLS} times per reply. Say where information came from (site name or link).
+` : "");
+const agentSkills = (agent) => (agent.skillIds || []).map((id) => skills.byId(id)).filter(Boolean);
+function skillsSection(agent) {
+  const list = agentSkills(agent);
+  if (!list.length) return "";
+  return `\n## Skills you can use
+These are your skills. When a task matches one, call use_skill with its name first and follow its instructions.
+Some skills mention scripts or files; you can't run those, so follow the written guidance only.
+${list.map((s) => `- ${s.name}: ${s.description || "(no description)"}`).join("\n")}
+`;
+}
 
 const slug = (s, n) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, n).replace(/^-+|-+$/g, "");
 
@@ -129,6 +163,26 @@ function makeAgent(a, i, style, seen) {
   seen.add(n);
   const level = TALK[a.talk] ? a.talk : (TALK[session.settings().talk] ? session.settings().talk : "balanced");
   return { name: n, role, persona, talk: level, skills: style === "work" ? ["critical-review"] : [], thinking: style === "work" ? "high" : "low" };
+}
+
+/** Turn web access on or off for one member. */
+export async function setAgentWeb(teamId, name, on) {
+  const team = await db.team(teamId);
+  const agent = team?.agents.find((a) => a.name === name);
+  if (!agent) throw new Error(`No one called @${name} in this team`);
+  agent.web = !!on;
+  await db.saveTeam(team);
+  return team;
+}
+
+/** Choose which skills (from Admin → Skills) one member has. */
+export async function setAgentSkills(teamId, name, ids) {
+  const team = await db.team(teamId);
+  const agent = team?.agents.find((a) => a.name === name);
+  if (!agent) throw new Error(`No one called @${name} in this team`);
+  agent.skillIds = [...new Set(ids.filter((id) => skills.byId(id)))];
+  await db.saveTeam(team);
+  return team;
 }
 
 /** Change how much one member talks (Light / Balanced / Detailed). */
@@ -214,6 +268,7 @@ The human friend is "user".
 - You can see the recent group chat; use it when someone asks what was said.
 - Don't repeat what someone else already said. If you have nothing to add, answer exactly PASS (nothing is posted).
 
+${skillsSection(agent)}${webSection(agent)}
 ## Length
 ${talk(agent).style}
 
@@ -242,6 +297,7 @@ The human is "user".
 ## Your skills
 ${skills}
 
+${skillsSection(agent)}${webSection(agent)}
 ## Length
 ${talk(agent).style}
 
@@ -328,14 +384,16 @@ export class Engine extends EventTarget {
       ];
       let reply = "";
       let step = 0;
+      const budget = { web: MAX_WEB_CALLS };
       for (; step < MAX_TOOL_STEPS; step++) {
-        const out = await this.chat({ model, messages, tools: TOOLS, thinking: thinking ?? agent.thinking, maxTokens,
+        const tools = [...TOOLS, ...(agentSkills(agent).length ? [USE_SKILL] : []), ...(canBrowse(agent) ? WEB_TOOLS : [])];
+        const out = await this.chat({ model, messages, tools, thinking: thinking ?? agent.thinking, maxTokens,
           meta: { team: team.id, agent: agent.name } });
         messages.push(out);
         if (!out.tool_calls?.length) { reply = (out.content || "").trim(); break; }
         for (const c of out.tool_calls) {
           let result;
-          try { result = await this.runTool(team, agent, c.function.name, JSON.parse(c.function.arguments || "{}"), msg, roster); }
+          try { result = await this.runTool(team, agent, c.function.name, JSON.parse(c.function.arguments || "{}"), msg, roster, budget); }
           catch (e) { result = `tool error: ${e.message}`; }
           messages.push({ role: "tool", tool_call_id: c.id, content: String(result) });
         }
@@ -358,7 +416,25 @@ export class Engine extends EventTarget {
     }
   }
 
-  async runTool(team, agent, name, args, msg, roster) {
+  async runTool(team, agent, name, args, msg, roster, budget = { web: MAX_WEB_CALLS }) {
+    if (name === "web_search" || name === "read_page") {
+      if (!canBrowse(agent)) return "Web access is off for you.";
+      if (budget.web-- <= 0) return `Web limit reached for this reply (${MAX_WEB_CALLS}). Answer with what you have.`;
+      const meta = { team: team.id, agent: agent.name };
+      if (name === "web_search") {
+        const q = String(args.query || "").trim();
+        await db.post(team.id, "system", ["user"], `🔎 ${agent.name} searched the web: “${q.slice(0, 120)}”`, msg);
+        this.changed(team.id);
+        const r = await api("/web/search", { method: "POST", body: { query: q, meta } });
+        return r.results.map((x, i) => `${i + 1}. ${x.title}\n${x.url}\n${x.content}`).join("\n\n") || "No results.";
+      }
+      let host = String(args.url || "");
+      try { host = new URL(host).hostname; } catch {}
+      await db.post(team.id, "system", ["user"], `🌐 ${agent.name} is reading ${host}`, msg);
+      this.changed(team.id);
+      const page = await api("/web/read", { method: "POST", body: { url: String(args.url || ""), meta } });
+      return `Page: ${page.url}\n\n${page.content}`;
+    }
     if (name === "send_message") {
       let to = args.to || [];
       if (typeof to === "string") to = to.split(/[,\s]+/).filter(Boolean);
@@ -381,6 +457,14 @@ export class Engine extends EventTarget {
     }
     if (name === "forget") {
       return (await db.forget(team.id, [agent.name, SHARED], args.memory_id)) ? "deleted" : "no such memory";
+    }
+    if (name === "use_skill") {
+      const want = String(args.name || "").toLowerCase().trim();
+      const s = agentSkills(agent).find((k) => k.name === want);
+      if (!s) return `No skill called "${args.name}". Your skills: ${agentSkills(agent).map((k) => k.name).join(", ") || "none"}`;
+      await db.post(team.id, "system", ["user"], `📘 ${agent.name} is using the skill “${s.name}”`, msg);
+      this.changed(team.id);
+      return `# Skill: ${s.name}\n${s.body}`;
     }
     if (name === "list_agents") {
       return team.agents.map((a) => `${a.name}: ${a.role}`).join("\n");
