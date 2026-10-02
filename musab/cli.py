@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import signal
 import sys
@@ -153,9 +154,15 @@ def cmd_memory(cfg: Config, a) -> None:
         print(f"[{m.id}] {m.content}")
 
 
+def cmd_serve(cfg: Config, a) -> None:
+    from .server import serve
+    serve(cfg, a.host, a.port, a.token or os.environ.get("MUSAB_UI_TOKEN", ""))
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="musab", description="Dynamic team of independent DeepSeek agents")
     p.add_argument("--home", default=".", help="project folder with agents/ and skills/")
+    p.add_argument("--team", help="use a team made in the web UI (folder name in data/teams/)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("agents", help="list agents")
@@ -188,10 +195,21 @@ def main(argv: list[str] | None = None) -> None:
     m.add_argument("--forget", type=int)
     m.add_argument("--limit", type=int, default=50)
 
+    sv = sub.add_parser("serve", help="web app (PWA): create teams and chat with them")
+    sv.add_argument("--host", default="127.0.0.1",
+                    help="0.0.0.0 to open it from your phone on the same network")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--token", help="require this access token (or set MUSAB_UI_TOKEN)")
+
     a = p.parse_args(argv)
     cfg = Config.load(a.home)
+    if a.team:
+        try:
+            cfg = cfg.for_team(a.team)
+        except (ValueError, FileNotFoundError) as e:
+            sys.exit(str(e))
     {"agents": cmd_agents, "new-agent": cmd_new_agent, "run": cmd_run, "say": cmd_say,
-     "chat": cmd_chat, "log": cmd_log, "memory": cmd_memory}[a.cmd](cfg, a)
+     "chat": cmd_chat, "log": cmd_log, "memory": cmd_memory, "serve": cmd_serve}[a.cmd](cfg, a)
 
 
 if __name__ == "__main__":

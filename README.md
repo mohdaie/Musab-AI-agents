@@ -36,7 +36,33 @@ cp .env.example .env        # put your DeepSeek key in DEEPSEEK_API_KEY
 
 You can override the model per agent with `model:` in its YAML, so you can mix the two models, for example Flash for a reviewer agent and Pro for the rest. Thinking effort is set per agent with `thinking: off | low | high | max`.
 
-## Use
+## Web app (PWA)
+
+```bash
+musab serve                 # then open http://localhost:8765
+```
+
+The app walks you through it:
+
+1. **Create a team**: give it a name and pick *Team of engineers* or *Group of friends*.
+2. **How many agents**: 1 to 12.
+3. **Agent #1, #2, ...**: a name (their `@handle`), a designation (e.g. "Database administrator" or "The joker"), and what they're expert at or their personality. *Fill with examples* fills it in for you.
+4. **Chat room**: the team is saved and you land in a group chat with all of them. A message goes to everyone; tap a name (or start with `@name`) to talk to one agent. You can see who is typing and when agents talk to each other (`zu → @charles`).
+
+Engineers stay in their own expertise and hand work to each other. Friends chat casually, stay in character and answer more quickly (`thinking: low`).
+
+`musab serve` runs the agents of every team itself, so you don't need `musab run`. Each team is saved in `data/teams/<team>/` (`team.yaml`, `agents/*.yaml`, its own `musab.db` with chat history and memory). You can still edit the YAML files by hand, or use the CLI on a team with `--team`, e.g. `musab --team it-ops memory zu`.
+
+**On your phone.** Open it from your phone on the same Wi-Fi with a token so nobody else can use your DeepSeek credits:
+
+```bash
+musab serve --host 0.0.0.0 --token pick-a-secret
+# on the phone: http://<your-pc-ip>:8765/?token=pick-a-secret
+```
+
+iPhone: *Share → Add to Home Screen*. Android Chrome only offers *Install app* on HTTPS (or localhost), so put it behind HTTPS, for example `tailscale serve 8765` or a Cloudflare tunnel. Over plain HTTP it still works in the browser.
+
+## Use (command line)
 
 ```bash
 musab run                   # start all agents (terminal 1)

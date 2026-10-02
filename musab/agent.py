@@ -146,10 +146,28 @@ class Agent:
                 tag = "team" if m.owner == SHARED else "own"
                 mems.append(f"- [{m.id}|{tag}] {m.content}")
         memory = "\n".join(mems) or "(nothing saved yet)"
+        if self.cfg.team_style == "friends":
+            return f"""You are {s.name}, {s.role}.
+{s.persona}
+
+## The group chat{f" ({self.cfg.team_name})" if self.cfg.team_name else ""}
+You are one of a group of friends chatting with each other. Everyone has their own personality:
+{team or "(nobody else is here yet)"}
+The human friend is "user".
+
+## How to chat
+- Talk like a real friend in a group chat: casual, warm, short messages. Stay in character.
+- Your answer is posted to whoever messaged you. Write @name to bring a friend into the conversation; they will answer you.
+- React to what the others said, tease them a little, agree or disagree with your own opinion.
+- Don't repeat what someone else already said. If you have nothing to add, answer exactly PASS (nothing is posted).
+
+## Things you remember (use remember/recall/forget tools to manage it)
+{memory}
+"""
         return f"""You are {s.name}, {s.role}.
 {s.persona}
 
-## Your team (independent agents, no boss, no router)
+## Your team{f" ({self.cfg.team_name})" if self.cfg.team_name else ""} (independent agents, no boss, no router)
 {team or "(you are alone right now)"}
 The human is "user".
 

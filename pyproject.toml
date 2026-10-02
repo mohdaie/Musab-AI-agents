@@ -16,3 +16,6 @@ musab = "musab.cli:main"
 
 [tool.setuptools]
 packages = ["musab"]
+
+[tool.setuptools.package-data]
+musab = ["web/*", "web/icons/*"]
