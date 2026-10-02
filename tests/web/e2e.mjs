@@ -102,6 +102,8 @@ try {
   await page.fill("#key-label", "Main"); await page.fill("#key-value", GOOD); await page.click("text=Save key");
   await page.waitForFunction(() => document.querySelectorAll(".key-row").length === 2);
   check((await text()).includes("$9.50") && (await text()).includes("No balance"), "balances and status shown per key");
+  check(await page.locator("input[name=talk][value=balanced]").isChecked(), "talk level defaults to Balanced");
+  await page.click(".talk-option:has-text('Detailed')");
   await shot("02-admin-keys");
 
   // create a friends team
@@ -183,6 +185,17 @@ try {
   await page.click("button.send");
   for (let i = 0; i < 100 && !calls.some((c) => c.name === "nina"); i++) await page.waitForTimeout(100);
   check(calls.some((c) => c.name === "nina") && calls[0].body.messages[0].content.includes("@jess"), "new member answers and knows the group");
+  // Brief: only the most relevant agent answers a message to everyone, no thinking, short replies
+  await page.evaluate(() => { const s = JSON.parse(localStorage.getItem("musab.settings") || "{}"); s.talk = "brief"; localStorage.setItem("musab.settings", JSON.stringify(s)); });
+  calls.length = 0;
+  await page.fill("textarea", "Anyone up for football tonight?");
+  await page.click("button.send");
+  for (let i = 0; i < 100 && !calls.length; i++) await page.waitForTimeout(100);
+  await page.waitForTimeout(1500);
+  check(calls.length === 1 && calls[0].name === "amir", `Brief: only the most relevant agent answers (${calls.map((c) => c.name)})`);
+  check(calls[0]?.body.thinking.type === "disabled" && calls[0]?.body.max_tokens === 400 && calls[0]?.body.messages[0].content.includes("1-2 short sentences"),
+    "Brief: no thinking, capped and short");
+
   await page.click("[aria-label='Team info']");
   await page.click(".sheet-body button:has-text('Clear chat')");
   await page.waitForSelector("text=Say hi to the group");

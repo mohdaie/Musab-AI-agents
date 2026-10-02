@@ -167,7 +167,7 @@ function writeJSON(key, value) {
 }
 function emit() { try { window.dispatchEvent(new CustomEvent("musab-config")); } catch {} }
 
-export const DEFAULT_SETTINGS = { model: "deepseek-v4-pro", maxHops: 6, maxReplies: 20, fallback: true };
+export const DEFAULT_SETTINGS = { model: "deepseek-v4-pro", talk: "balanced", fallback: true };
 
 export const config = {
   settings() { return { ...DEFAULT_SETTINGS, ...readJSON("musab.settings", {}) }; },
