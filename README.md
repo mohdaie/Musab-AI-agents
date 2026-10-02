@@ -38,29 +38,46 @@ You can override the model per agent with `model:` in its YAML, so you can mix t
 
 ## Web app (PWA)
 
+**Link:** https://mohdaie.github.io/Musab-AI-agents/ (live once this is on `main` and GitHub Pages is on, see below). Open it on your phone and install it: iPhone *Share → Add to Home Screen*, Android Chrome *Install app*.
+
+The app runs entirely in your browser. There is no server: your teams, chats and agent memory are saved on your device (IndexedDB), and the agents call the DeepSeek API directly.
+
+1. **Admin** (shield icon, or *Admin: API keys and usage* on the first screen). Sign in with **admin / admin**, then change it. Add your DeepSeek API key.
+2. **Create a team**: give it a name and pick *Team of engineers* or *Group of friends*.
+3. **How many agents**: 1 to 12.
+4. **Agent #1, #2, ...**: a name (their `@handle`), a designation (e.g. "Database administrator" or "The joker"), and what they're expert at or their personality. *Fill with examples* fills it in for you.
+5. **Chat room**: a message goes to everyone; tap a name (or start with `@name`) to talk to one agent. You can see who is typing and when agents talk to each other (`zu → @charles`).
+
+Engineers stay in their own expertise and hand work to each other. Friends chat casually, stay in character and answer faster (`thinking: low`).
+
+### Admin page
+
+- **API keys.** Add as many DeepSeek keys as you like. Each one shows whether it works, its live balance from DeepSeek, and its requests, tokens and estimated cost for today and the last 30 days. Agents use the active key; if it is invalid or out of balance they move to the next one, and that key becomes active.
+- **Usage.** Requests, tokens in and out, and estimated cost for today, 7 days, 30 days or all time, a 14-day chart, and a breakdown by key and by team. The cost uses DeepSeek's published prices, including the cheaper off-peak hours; your real balance is on each key.
+- **Settings.** Model for all agents (V4 Pro or the cheaper V4.1 Flash), how many times agents can pass a thread between them, and a cap on agent replies per thread so long chains don't burn tokens.
+- **Login.** Change the username and password. *Forgot password?* resets it to admin / admin and, for safety, deletes the keys saved on that device.
+
+**Good to know.** Keys, usage and the admin login are stored only in the browser where you enter them, and keys are only ever sent to `api.deepseek.com`. The login protects the admin screen on that device; it is not an account. Anyone else who opens the link gets their own empty app and needs their own key. To share one key across devices you would need a small backend (for example Supabase) to hold it.
+
+### Turning on the GitHub link
+
+1. Merge this into `main`.
+2. In the repository: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+3. The *Deploy web app to GitHub Pages* workflow publishes `musab/web/` on every push to `main` that changes it (or run it by hand from the Actions tab).
+
+### Run it locally
+
 ```bash
 musab serve                 # then open http://localhost:8765
 ```
 
-The app walks you through it:
-
-1. **Create a team**: give it a name and pick *Team of engineers* or *Group of friends*.
-2. **How many agents**: 1 to 12.
-3. **Agent #1, #2, ...**: a name (their `@handle`), a designation (e.g. "Database administrator" or "The joker"), and what they're expert at or their personality. *Fill with examples* fills it in for you.
-4. **Chat room**: the team is saved and you land in a group chat with all of them. A message goes to everyone; tap a name (or start with `@name`) to talk to one agent. You can see who is typing and when agents talk to each other (`zu → @charles`).
-
-Engineers stay in their own expertise and hand work to each other. Friends chat casually, stay in character and answer more quickly (`thinking: low`).
-
-`musab serve` runs the agents of every team itself, so you don't need `musab run`. Each team is saved in `data/teams/<team>/` (`team.yaml`, `agents/*.yaml`, its own `musab.db` with chat history and memory). You can still edit the YAML files by hand, or use the CLI on a team with `--team`, e.g. `musab --team it-ops memory zu`.
-
-**On your phone.** Open it from your phone on the same Wi-Fi with a token so nobody else can use your DeepSeek credits:
+### Test it
 
 ```bash
-musab serve --host 0.0.0.0 --token pick-a-secret
-# on the phone: http://<your-pc-ip>:8765/?token=pick-a-secret
+npm i -g playwright && node tests/web/e2e.mjs
 ```
 
-iPhone: *Share → Add to Home Screen*. Android Chrome only offers *Install app* on HTTPS (or localhost), so put it behind HTTPS, for example `tailscale serve 8765` or a Cloudflare tunnel. Over plain HTTP it still works in the browser.
+This opens the app in a real browser with a fake DeepSeek and goes through admin login, keys, creating a team, chatting, key fallback and usage.
 
 ## Use (command line)
 

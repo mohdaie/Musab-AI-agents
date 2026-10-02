@@ -1,110 +1,29 @@
-/* Musab Agents PWA: create a team of agents, then chat with them. No framework. */
-"use strict";
+/* Musab Agents PWA: create a team of agents, then chat with them. No framework, no server:
+   teams, chats and memory are stored in this browser and the agents call DeepSeek directly. */
+import { adminView } from "./admin.js";
+import { config, db } from "./db.js";
+import { Engine, createTeam } from "./engine.js";
+import { $app, $banner, $sheet, avatar, colorFor, fmtTime, h, icon, richText, toast } from "./ui.js";
 
-const $app = document.getElementById("app");
-const $sheet = document.getElementById("sheet");
-const $banner = document.getElementById("banner");
-const $toast = document.getElementById("toast");
+// ------------------------------------------------------------------ data (all on this device)
+const engine = new Engine();
 
-// ------------------------------------------------------------------ helpers
-const ICONS = {
-  back: '<path d="M15 18l-6-6 6-6"/>',
-  plus: '<path d="M12 5v14M5 12h14"/>',
-  send: '<path d="M4 12l16-8-6 16-3-7-7-1z"/>',
-  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
-  work: '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2M3 13h18"/>',
-  friends: '<path d="M21 12a8 8 0 01-11.6 7.1L4 20l1-4.6A8 8 0 1121 12z"/><path d="M8.5 11h.01M12 11h.01M15.5 11h.01"/>',
-};
-const icon = (n) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n]}</svg>`;
+async function teamsWithLast() {
+  const teams = await db.teams();
+  for (const t of teams) t.last_message = (await db.recent(t.id, 1))[0] || null;
+  return teams.sort((a, b) => (b.last_message?.created_at || b.created_at || 0) - (a.last_message?.created_at || a.created_at || 0));
+}
 
-function h(tag, attrs = {}, ...kids) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v == null || v === false) continue;
-    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
-    else if (k === "html") el.innerHTML = v;
-    else if (k === "class") el.className = v;
-    else el.setAttribute(k, v === true ? "" : v);
+function checkStatus() {
+  const noKey = !config.keys().length;
+  $banner.hidden = !noKey;
+  if (noKey) {
+    $banner.replaceChildren("Agents can't reply yet. ",
+      h("a", { href: "#/admin" }, "Open Admin"), " and add your DeepSeek API key.");
   }
-  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid);
-  return el;
 }
-
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
-function colorFor(name) {
-  let x = 0;
-  for (const ch of name) x = (x * 31 + ch.charCodeAt(0)) >>> 0;
-  return `hsl(${x % 360} 55% 48%)`;
-}
-
-function avatar(name, size = "") {
-  const a = h("span", { class: `avatar ${size}`, "aria-hidden": "true" }, (name || "?").slice(0, size === "sm" ? 1 : 2));
-  a.style.setProperty("--c", name === "user" ? "var(--mine)" : colorFor(name || "?"));
-  return a;
-}
-
-function fmtTime(ts) {
-  const d = new Date(ts * 1000);
-  const today = new Date().toDateString() === d.toDateString();
-  return today ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : d.toLocaleDateString([], { day: "numeric", month: "short" });
-}
-
-// Escaped text with ```code blocks```, `inline code`, **bold** and @mentions.
-function richText(text, names) {
-  const parts = String(text).split(/```(?:[\w-]*\n)?([\s\S]*?)```/g);
-  return parts.map((p, i) => {
-    if (i % 2) return `<pre><code>${esc(p.replace(/\n$/, ""))}</code></pre>`;
-    return esc(p)
-      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/@([a-z][a-z0-9_-]{0,31})/gi, (m, n) =>
-        names.has(n.toLowerCase()) || n.toLowerCase() === "user" ? `<span class="mention">${m}</span>` : m);
-  }).join("");
-}
-
-function toast(msg) {
-  $toast.textContent = msg;
-  $toast.hidden = false;
-  clearTimeout(toast.t);
-  toast.t = setTimeout(() => ($toast.hidden = true), 3500);
-}
-
-// ------------------------------------------------------------------ API
-const params = new URLSearchParams(location.search);
-if (params.get("token")) {
-  try { localStorage.setItem("musab.token", params.get("token")); } catch {}
-  history.replaceState(null, "", location.pathname + location.hash);
-}
-function token() { try { return localStorage.getItem("musab.token") || ""; } catch { return ""; } }
-
-async function api(path, opts = {}) {
-  const headers = { ...(opts.body ? { "Content-Type": "application/json" } : {}) };
-  if (token()) headers.Authorization = `Bearer ${token()}`;
-  const res = await fetch(`/api${path}`, {
-    method: opts.method || "GET", headers,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
-  let data = null;
-  try { data = await res.json(); } catch {}
-  if (!res.ok) {
-    if (res.status === 401) {
-      const t = prompt("This server needs an access token:");
-      if (t) { try { localStorage.setItem("musab.token", t); } catch {} return api(path, opts); }
-    }
-    throw new Error((data && data.error) || `HTTP ${res.status}`);
-  }
-  return data;
-}
-
-async function checkStatus() {
-  try {
-    const s = await api("/status");
-    $banner.hidden = s.llm;
-    if (!s.llm) $banner.innerHTML = `Agents can't reply yet: put your key in <code>DEEPSEEK_API_KEY</code> in <code>.env</code>, then restart <code>musab serve</code>.`;
-  } catch { /* offline: the views show their own errors */ }
-}
+window.addEventListener("musab-config", checkStatus);
+window.addEventListener("storage", checkStatus);
 
 // ------------------------------------------------------------------ router
 let cleanup = null;
@@ -115,6 +34,7 @@ function route() {
   window.scrollTo(0, 0);
   const [, view, id] = location.hash.split("/");
   if (view === "new") return wizard.start();
+  if (view === "admin") return adminView({ go, setCleanup: (fn) => (cleanup = fn) });
   if (view === "team" && id) return chatView(decodeURIComponent(id));
   return homeView();
 }
@@ -124,21 +44,23 @@ window.addEventListener("hashchange", route);
 async function homeView() {
   $app.replaceChildren(h("div", { class: "spinner" }));
   let teams;
-  try { teams = await api("/teams"); } catch (e) {
-    $app.replaceChildren(h("div", { class: "page" }, h("p", { class: "error" }, `Can't reach the server: ${e.message}`),
+  try { teams = await teamsWithLast(); } catch (e) {
+    $app.replaceChildren(h("div", { class: "page" }, h("p", { class: "error" }, `Can't open this device's storage: ${e.message}`),
       h("button", { class: "btn", onclick: homeView }, "Try again")));
     return;
   }
   const page = h("div", { class: "page" });
   if (!teams.length) {
     page.append(h("div", { class: "hero" },
-      h("img", { class: "logo", src: "/icons/icon-192.png", alt: "" }),
+      h("img", { class: "logo", src: "icons/icon-192.png", alt: "" }),
       h("h2", {}, "Build your AI team"),
       h("p", {}, "Pick how many agents you want, give each one a designation and what they're good at, then chat with all of them in one room. Make it a team of engineers or a group of friends."),
-      h("button", { class: "btn primary", onclick: () => go("#/new"), html: `${icon("plus")} Create a team` })));
+      h("button", { class: "btn primary", onclick: () => go("#/new"), html: `${icon("plus")} Create a team` }),
+      h("p", { class: "hero-admin" }, h("a", { href: "#/admin", html: `${icon("admin")} Admin: API keys and usage` }))));
   } else {
     page.append(h("div", { class: "topbar" },
       h("h1", {}, "Your teams"),
+      h("button", { class: "icon-btn", "aria-label": "Admin", title: "Admin", html: icon("admin"), onclick: () => go("#/admin") }),
       h("button", { class: "btn primary", onclick: () => go("#/new"), html: `${icon("plus")} New team` })));
     page.append(h("div", { class: "team-list" }, teams.map((t) => {
       const last = t.last_message;
@@ -276,7 +198,7 @@ const wizard = {
       if (s.error) { err.textContent = s.error; err.hidden = false; err.scrollIntoView({ block: "center" }); return; }
       submit.disabled = true; submit.textContent = "Saving…";
       try {
-        const team = await api("/teams", { method: "POST", body: { name: s.name.trim(), style: s.style, agents } });
+        const team = await createTeam({ name: s.name.trim(), style: s.style, agents });
         this.state = null;
         go(`#/team/${encodeURIComponent(team.id)}`);
       } catch (ex) {
@@ -303,14 +225,15 @@ const wizard = {
 async function chatView(id) {
   $app.replaceChildren(h("div", { class: "spinner" }));
   let team;
-  try { team = await api(`/teams/${encodeURIComponent(id)}`); } catch (e) {
-    $app.replaceChildren(h("div", { class: "page" }, h("p", { class: "error" }, e.message),
+  try { team = await db.team(id); } catch {}
+  if (!team) {
+    $app.replaceChildren(h("div", { class: "page" }, h("p", { class: "error" }, "This team doesn't exist on this device."),
       h("button", { class: "btn", onclick: () => go("#/") }, "Back to teams")));
     return;
   }
   const names = new Set(team.agents.map((a) => a.name));
   const roles = Object.fromEntries(team.agents.map((a) => [a.name, a.role]));
-  let lastId = 0, prev = null, alive = true, timer = null, pollMs = 1500, loaded = false;
+  let lastId = 0, prev = null, alive = true, timer = null, pollMs = 2000;
 
   const list = h("div", { class: "messages-inner" });
   const scroller = h("div", { class: "messages" }, list);
@@ -357,7 +280,7 @@ async function chatView(id) {
     if (!text) return;
     sendBtn.disabled = true;
     try {
-      const m = await api(`/teams/${encodeURIComponent(id)}/messages`, { method: "POST", body: { content: text } });
+      const m = await engine.post(id, text);
       input.value = ""; autosize();
       add([m]); poll(true);
     } catch (ex) { toast(ex.message); sendBtn.disabled = false; }
@@ -411,24 +334,28 @@ async function chatView(id) {
   async function poll(once = false) {
     if (!once) clearTimeout(timer);
     try {
-      const r = await api(`/teams/${encodeURIComponent(id)}/messages?after=${lastId}`);
+      const msgs = await db.messagesAfter(id, lastId);
       if (!alive) return;
-      if (!loaded) { loaded = true; if (!r.messages.length) list.replaceChildren(emptyState()); }
-      add(r.messages); setBusy(r.busy);
-      pollMs = r.busy.length ? 1000 : 2000;
+      add(msgs); setBusy(engine.busyIn(id));
+      pollMs = 2000;
     } catch { pollMs = Math.min(pollMs * 2, 15000); }
     if (!once && alive) timer = setTimeout(poll, document.hidden ? 10000 : pollMs);
   }
   const onVis = () => { if (!document.hidden) poll(); };
+  const onChange = (e) => { if (e.detail.team === id) { setBusy(engine.busyIn(id)); poll(true); } };
   document.addEventListener("visibilitychange", onVis);
-  cleanup = () => { alive = false; clearTimeout(timer); document.removeEventListener("visibilitychange", onVis); };
+  engine.addEventListener("change", onChange);
+  cleanup = () => {
+    alive = false; clearTimeout(timer);
+    document.removeEventListener("visibilitychange", onVis);
+    engine.removeEventListener("change", onChange);
+  };
 
   // first load: last 200 messages
   try {
-    const r = await api(`/teams/${encodeURIComponent(id)}/messages?limit=200`);
-    loaded = true;
-    if (r.messages.length) add(r.messages); else list.replaceChildren(emptyState());
-    setBusy(r.busy);
+    const msgs = await db.recent(id, 200);
+    if (msgs.length) add(msgs); else list.replaceChildren(emptyState());
+    setBusy(engine.busyIn(id));
     scroller.scrollTop = scroller.scrollHeight;
   } catch (e) { toast(e.message); }
   timer = setTimeout(poll, pollMs);
@@ -443,7 +370,7 @@ function teamSheet(team) {
     h("div", { class: "footer-actions" },
       h("button", { class: "btn danger", onclick: async () => {
         if (!confirm(`Delete “${team.name}” and its whole chat history and memory? This can't be undone.`)) return;
-        try { await api(`/teams/${encodeURIComponent(team.id)}`, { method: "DELETE" }); $sheet.close(); go("#/"); }
+        try { await db.deleteTeam(team.id); $sheet.close(); go("#/"); }
         catch (e) { toast(e.message); }
       } }, "Delete team"),
       h("button", { class: "btn primary", onclick: () => $sheet.close() }, "Close")));
@@ -454,7 +381,7 @@ $sheet.addEventListener("click", (e) => { if (e.target === $sheet) $sheet.close(
 
 // ------------------------------------------------------------------ boot
 if ("serviceWorker" in navigator && window.isSecureContext) {
-  navigator.serviceWorker.register("/sw.js").catch(() => {});
+  navigator.serviceWorker.register("./sw.js").catch(() => {});
 }
 checkStatus();
 route();
