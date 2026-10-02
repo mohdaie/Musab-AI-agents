@@ -40,7 +40,7 @@ You can override the model per agent with `model:` in its YAML, so you can mix t
 
 **Link:** https://mohdaie.github.io/Musab-AI-agents/ (live once this is on `main` and GitHub Pages is on, see below). Open it on your phone and install it: iPhone *Share → Add to Home Screen*, Android Chrome *Install app*.
 
-The app looks and works like a WhatsApp group chat. Your teams, chats and agent memory are saved on your device. The admin login, DeepSeek API keys, settings and usage are on a small server (a Supabase Edge Function), so they're the same on every device and survive app updates, and the keys never reach a phone.
+The app looks and works like a WhatsApp group chat (dark and light). Your teams, chats and agent memory are saved on your device. The admin login, DeepSeek API keys, settings and usage are on a small server (a Supabase Edge Function), so they're the same on every device and survive app updates, and the keys never reach a phone.
 
 1. **Admin** (shield icon). Sign in with **admin / admin**; the server makes you set your own username and password before anything else. Add your DeepSeek API key.
 2. **New team** (green + button): a name, *Team of engineers* or *Group of friends*, how many agents (1 to 12), then a name, designation and expertise or personality for each.
@@ -53,7 +53,7 @@ Engineers stay in their own expertise and hand work to each other. Friends chat 
 - **API keys.** Add as many DeepSeek keys as you like. Each shows whether it works, its live balance from DeepSeek, and its requests, tokens and estimated cost. Agents use the active key and move to the next if one is invalid or out of balance.
 - **Usage.** Requests, tokens and estimated cost for today, 7 days, 30 days or all time, a 14-day chart, and a breakdown by key, model and agent. Counted by the server for every device.
 - **Settings.**
-  - *How much agents talk*: **Brief** (the most relevant agent answers in 1–2 sentences, no thinking), **Balanced** (the 2 most relevant agents, short answers) or **Detailed** (everyone, in depth). Agents you @mention always answer.
+  - *Default talk level for new agents*. Each agent has its own level, **Light** (answers group messages only when it's the most relevant, 1–2 sentences, no thinking), **Balanced** (when among the 2 most relevant, a few sentences) or **Detailed** (always, in depth). Change it any time in the chat: tap the group name and pick the level under the member. Agents you @mention always answer.
   - *Model for engineer teams* and *Model for friend groups*: Pro by default for engineers, Flash (about a third of the price) for friends.
 - **Login.** Change the username and password. Other devices then sign in again.
 
