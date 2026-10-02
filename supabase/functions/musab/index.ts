@@ -4,6 +4,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { discover, fetchSkill, GitHubError, parseSkillMd } from "./github.ts";
 import { read as readPage, search as webSearch, WebError } from "./web.ts";
+import * as threads from "./threads.ts";
 
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
   auth: { persistSession: false },
@@ -177,11 +178,68 @@ async function insertSkill(row: any) {
   throw new HttpError(400, "Too many skills with that name.");
 }
 
+// ------------------------------------------------------------------ threads
+// Meta sends the person back here after they allow the app; this URL goes in the Meta app's redirect list.
+const THREADS_REDIRECT = `${Deno.env.get("SUPABASE_URL")}/functions/v1/musab/threads/callback`;
+const APP_URL = "https://mohdaie.github.io/Musab-AI-agents/";
+const threadsStatus = (cfg: any) => ({ appId: cfg.threads_app_id || "", configured: !!(cfg.threads_app_id && cfg.threads_app_secret),
+  connected: !!cfg.threads_token, username: cfg.threads_username || "", expiresAt: cfg.threads_expires_at ? Date.parse(cfg.threads_expires_at) : 0,
+  redirectUri: THREADS_REDIRECT });
+const THREADS_OFF = { threads_token: null, threads_user_id: null, threads_username: null, threads_expires_at: null, threads_refreshed_at: null };
+
+/** The stored token, refreshed for another 60 days when it was last refreshed over a week ago. */
+async function threadsToken(cfg: any) {
+  if (!cfg.threads_token) throw new HttpError(409, "Threads isn't connected. Connect it in Admin → Threads.");
+  if (cfg.threads_expires_at && Date.parse(cfg.threads_expires_at) < Date.now())
+    throw new HttpError(409, "The Threads sign-in has expired. Reconnect in Admin → Threads.");
+  const last = Date.parse(cfg.threads_refreshed_at || 0) || 0;
+  if (Date.now() - last > 7 * 864e5) {
+    try {
+      const r = await threads.refresh(fetch, cfg.threads_token);
+      await sb.from("app_config").update({ threads_token: r.token, threads_expires_at: new Date(r.expiresAt).toISOString(),
+        threads_refreshed_at: new Date().toISOString() }).eq("id", 1);
+      return r.token;
+    } catch { /* not yet a day old, or a hiccup: keep using the current one */ }
+  }
+  return cfg.threads_token;
+}
+const threadsFail = async (e: unknown) => {
+  if (e instanceof threads.ThreadsError) {
+    if (e.expired) await sb.from("app_config").update(THREADS_OFF).eq("id", 1);
+    return new HttpError(e.expired ? 409 : 400, e.message);
+  }
+  return e;
+};
+
+/** Meta's redirect after sign-in. No session header here, so the signed `state` proves the admin started it. */
+async function threadsCallback(url: URL) {
+  const cfg = await config();
+  let ret = APP_URL;
+  const back = (result: string) => new Response(null, { status: 302, headers: { Location: `${ret}#/admin/threads-${result}`, "Cache-Control": "no-store" } });
+  try {
+    const [body, sig] = String(url.searchParams.get("state") || "").split(".");
+    if (!body || !sig || sig !== await hmac(cfg.session_secret, `threads:${body}`)) throw new Error("This sign-in link isn't valid. Start again from Admin.");
+    const p = JSON.parse(atob(body.replace(/-/g, "+").replace(/_/g, "/")));
+    if (typeof p.ret === "string" && ORIGINS.some((r) => r.test(new URL(p.ret).origin))) ret = p.ret;
+    if (p.v !== cfg.token_version || p.exp < Date.now()) throw new Error("This sign-in link has expired. Start again from Admin.");
+    if (url.searchParams.get("error")) throw new Error("Threads access wasn't allowed.");
+    const code = String(url.searchParams.get("code") || "").replace(/#_$/, "");
+    if (!code) throw new Error("Threads didn't send a sign-in code.");
+    const t = await threads.exchangeCode(fetch, { appId: cfg.threads_app_id, secret: cfg.threads_app_secret, redirectUri: THREADS_REDIRECT, code });
+    await sb.from("app_config").update({ threads_token: t.token, threads_user_id: t.userId, threads_username: t.username,
+      threads_expires_at: new Date(t.expiresAt).toISOString(), threads_refreshed_at: new Date().toISOString() }).eq("id", 1);
+    return back("ok");
+  } catch (e) {
+    return back(`error:${encodeURIComponent(String((e as Error).message).slice(0, 160))}`);
+  }
+}
+
 // ------------------------------------------------------------------ routes
 async function route(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname.replace(/^.*\/musab/, "") || "/";
   const m = req.method;
+  if (m === "GET" && path === "/threads/callback") return threadsCallback(url);
 
   if (m === "POST" && path === "/login") {
     const { username = "", password = "" } = await req.json().catch(() => ({}));
@@ -207,7 +265,7 @@ async function route(req: Request): Promise<Response> {
 
   if (m === "POST" && path === "/chat") return json(req, 200, await chat(req, cfg));
   if (m === "GET" && path === "/me") return json(req, 200, { username: cfg.username, mustChange: cfg.must_change,
-    settings: { ...cfg.settings, webSearch: !!cfg.tavily_key } });
+    settings: { ...cfg.settings, webSearch: !!cfg.tavily_key, threads: !!cfg.threads_token, threadsUser: cfg.threads_username || "" } });
 
   if (m === "POST" && path === "/login/change") {
     const { username = "", password = "" } = await req.json();
@@ -222,7 +280,8 @@ async function route(req: Request): Promise<Response> {
   if (m === "GET" && path === "/admin") {
     const { data } = await sb.from("api_keys").select("*").order("created_at");
     return json(req, 200, { username: cfg.username, mustChange: cfg.must_change, settings: cfg.settings,
-      keys: (data || []).map(publicKey), githubToken: !!cfg.github_token, webSearch: !!cfg.tavily_key });
+      keys: (data || []).map(publicKey), githubToken: !!cfg.github_token, webSearch: !!cfg.tavily_key,
+      threads: threadsStatus(cfg) });
   }
 
   // ---------------------------------------------------------------- web search (Tavily)
@@ -250,6 +309,58 @@ async function route(req: Request): Promise<Response> {
       await sb.from("usage").insert({ model: kind, ...meta, ok: false, status: 400, ms: Date.now() - t0, error: String((e as Error).message).slice(0, 200) });
       if (e instanceof WebError) throw new HttpError(400, e.message);
       throw e;
+    }
+  }
+  // ---------------------------------------------------------------- threads
+  if (m === "POST" && path === "/threads/app") { // the Meta app's Threads app ID and secret; empty removes everything
+    const b = await req.json();
+    const appId = String(b.appId || "").trim();
+    if (!appId && !String(b.appSecret || "").trim()) {
+      await sb.from("app_config").update({ ...THREADS_OFF, threads_app_id: null, threads_app_secret: null }).eq("id", 1);
+      return json(req, 200, threadsStatus({}));
+    }
+    // Saving the same app again without retyping the secret keeps the stored one.
+    const secret = String(b.appSecret || "").trim() || (appId === cfg.threads_app_id ? cfg.threads_app_secret || "" : "");
+    if (!/^\d{6,25}$/.test(appId)) throw new HttpError(400, "The Threads app ID is a number (App settings → Basic → Threads app ID).");
+    if (!/^[A-Za-z0-9]{16,64}$/.test(secret)) throw new HttpError(400, "That doesn't look like the Threads app secret (App settings → Basic → Threads app secret).");
+    const patch = { threads_app_id: appId, threads_app_secret: secret, ...(appId !== cfg.threads_app_id ? THREADS_OFF : {}) };
+    await sb.from("app_config").update(patch).eq("id", 1);
+    return json(req, 200, threadsStatus({ ...cfg, ...patch }));
+  }
+  if (m === "POST" && path === "/threads/start") { // returns the Threads sign-in page; `ret` is where to come back to
+    if (!cfg.threads_app_id || !cfg.threads_app_secret) throw new HttpError(409, "Save the Threads app ID and secret first.");
+    const { ret = APP_URL } = await req.json().catch(() => ({}));
+    let back = APP_URL;
+    try { if (ORIGINS.some((r) => r.test(new URL(String(ret)).origin))) back = String(ret).split("#")[0]; } catch { /* default */ }
+    const body = b64url(enc.encode(JSON.stringify({ v: cfg.token_version, exp: Date.now() + 15 * 60e3, ret: back })));
+    const state = `${body}.${await hmac(cfg.session_secret, `threads:${body}`)}`;
+    return json(req, 200, { url: threads.authUrl(cfg.threads_app_id, THREADS_REDIRECT, state) });
+  }
+  if (m === "POST" && path === "/threads/disconnect") {
+    await sb.from("app_config").update(THREADS_OFF).eq("id", 1);
+    return json(req, 200, threadsStatus({ ...cfg, ...THREADS_OFF }));
+  }
+  if (m === "POST" && (path === "/threads/search" || path === "/threads/publish")) {
+    const b = await req.json();
+    const meta = { team: String(b.meta?.team || "").slice(0, 80), agent: String(b.meta?.agent || "").slice(0, 40) };
+    const kind = path === "/threads/search" ? "threads-search" : "threads-post";
+    const t0 = Date.now();
+    const token = await threadsToken(cfg);
+    try {
+      let out: any;
+      if (kind === "threads-search") {
+        const results = await threads.search(fetch, token, String(b.query || ""), { recent: !!b.recent, tag: !!b.tag });
+        const own = cfg.threads_username || "";
+        // Before Meta approves threads_keyword_search, search only covers the connected account's own posts.
+        out = { results, ownOnly: !results.length || results.every((r: any) => r.username === own) };
+      } else {
+        out = await threads.publish(fetch, token, cfg.threads_user_id, b.posts);
+      }
+      await sb.from("usage").insert({ model: kind, ...meta, ok: !out.error, status: 200, ms: Date.now() - t0, error: String(out.error || "").slice(0, 200) });
+      return json(req, 200, out);
+    } catch (e) {
+      await sb.from("usage").insert({ model: kind, ...meta, ok: false, status: 400, ms: Date.now() - t0, error: String((e as Error).message).slice(0, 200) });
+      throw await threadsFail(e);
     }
   }
   if (m === "POST" && path === "/github-token") {

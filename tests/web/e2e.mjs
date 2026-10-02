@@ -70,6 +70,18 @@ function deepseek(key, body) {
     if (n < 4) return msg({ content: "", tool_calls: [{ id: `c${n}`, type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: `q${n}` }) } }] });
     return msg({ content: "Done searching." });
   }
+  // sofi (Threads on): searches Threads, drafts a too-long post, fixes it after the error, then answers
+  if (name === "sofi" && last.role === "user" && /threads post/.test(last.content)) {
+    return msg({ content: "", tool_calls: [{ id: "t1", type: "function", function: { name: "threads_search", arguments: JSON.stringify({ query: "budget tips", recent: true }) } }] });
+  }
+  if (name === "sofi" && last.role === "tool" && /@budgetguru/.test(last.content)) {
+    return msg({ content: "", tool_calls: [{ id: "t2", type: "function", function: { name: "threads_draft", arguments: JSON.stringify({ posts: ["x".repeat(600)] }) } }] });
+  }
+  if (name === "sofi" && last.role === "tool" && /Draft not shown: Post 1 is 600 characters/.test(last.content)) {
+    return msg({ content: "", tool_calls: [{ id: "t3", type: "function", function: { name: "threads_draft",
+      arguments: JSON.stringify({ posts: ["1/ Save first, spend later 💸", "2/ Track every ringgit for 30 days."] }) } }] });
+  }
+  if (name === "sofi" && last.role === "tool" && /Post to Threads button/.test(last.content)) return msg({ content: "Draft is ready for you." });
   if (name === "zu") return msg({ content: "Check the System event log first." });
   if (name === "charles") return msg({ content: "PASS — nothing to add from the database side." });
   return msg({ content: "PASS" });
@@ -84,6 +96,7 @@ const REPO = { repo: "acme/skills", ref: "main", skills: [
   { path: "skills/pdf/SKILL.md", name: "pdf", description: "Work with PDF files.", hasScripts: true, body: "Run scripts/fill.py ..." },
 ] };
 const S = { username: "admin", password: "admin", mustChange: true, version: 1, keys: [], usage: [], skills: [], githubToken: false, web: false, webCalls: [],
+  threads: { appId: "", configured: false, connected: false, username: "" }, threadsCalls: [],
   settings: { talk: "balanced", models: { work: "deepseek-v4-pro", friends: "deepseek-flash" }, fallback: true, activeKey: null } };
 const pub = (k) => ({ id: k.id, label: k.label, masked: `${k.key.slice(0, 3)}…${k.key.slice(-4)}`, status: k.status, balance: k.balance });
 let nextId = 1;
@@ -95,8 +108,9 @@ function serverApi(method, path, auth, body) {
   if (auth !== `t${S.version}`) return [401, { error: "Sign in again" }];
   if (S.mustChange && !(path === "/login/change" || (method === "GET" && (path === "/me" || path === "/admin"))))
     return [403, { error: "Change the default password first." }];
-  if (path === "/me") return [200, { username: S.username, mustChange: S.mustChange, settings: { ...S.settings, webSearch: S.web } }];
-  if (path === "/admin") return [200, { username: S.username, mustChange: S.mustChange, settings: S.settings, keys: S.keys.map(pub), webSearch: S.web }];
+  if (path === "/me") return [200, { username: S.username, mustChange: S.mustChange, settings: { ...S.settings, webSearch: S.web, threads: S.threads.connected, threadsUser: S.threads.username } }];
+  if (path === "/admin") return [200, { username: S.username, mustChange: S.mustChange, settings: S.settings, keys: S.keys.map(pub), webSearch: S.web,
+    threads: { ...S.threads, expiresAt: S.threads.connected ? Date.now() + 59 * 864e5 : 0, redirectUri: "https://x.supabase.co/functions/v1/musab/threads/callback" } }];
   if (path === "/login/change") {
     if (body.password.length < 8) return [400, { error: "Use at least 8 characters for the password." }];
     Object.assign(S, { username: body.username, password: body.password, mustChange: false, version: S.version + 1 });
@@ -119,6 +133,17 @@ function serverApi(method, path, auth, body) {
   if (path === "/web/search") { S.webCalls.push(["search", body.query, body.meta.agent]);
     return [200, { results: [{ title: "Kerberos hardening", url: "https://learn.example.com/kb1", content: "Enforce AES for Kerberos." }] }]; }
   if (path === "/web/read") { S.webCalls.push(["read", body.url, body.meta.agent]); return [200, { url: body.url, content: "# KB1\nEnforce AES." }]; }
+  if (path === "/threads/app") {
+    if (!/^\d{6,25}$/.test(body.appId)) return [400, { error: "The Threads app ID is a number (App settings → Basic → Threads app ID)." }];
+    Object.assign(S.threads, { appId: body.appId, configured: true }); return [200, S.threads];
+  }
+  // The real server returns Meta's sign-in page; after the person allows it, Meta -> /threads/callback -> back here.
+  if (path === "/threads/start") { Object.assign(S.threads, { connected: true, username: "musab.creates" }); return [200, { url: `${body.ret}#/admin/threads-ok` }]; }
+  if (path === "/threads/search") { S.threadsCalls.push(["search", body.query, body.recent, body.meta.agent]);
+    return [200, { ownOnly: false, results: [{ username: "budgetguru", text: "Pay yourself first: move 20% to savings on payday.",
+      permalink: "https://www.threads.com/@budgetguru/post/1", timestamp: "2026-09-30T10:00:00+0000", mediaType: "TEXT" }] }]; }
+  if (path === "/threads/publish") { S.threadsCalls.push(["publish", body.posts, body.meta.agent]);
+    return [200, { ids: body.posts.map((_, i) => `m${i + 1}`), permalink: "https://www.threads.com/@musab.creates/post/abc", error: "" }]; }
   if (path === "/github-token") { S.githubToken = !!body.token; return [200, { githubToken: S.githubToken }]; }
   if (path === "/skills" && method === "GET") return [200, S.skills];
   if (path === "/skills" && method === "POST") {
@@ -352,6 +377,7 @@ try {
   // ---- web search: key in Admin, switch on per agent, agent searches + reads, limit per reply
   await page.click("[aria-label='Team info']");
   check(await page.locator(".member-row:has-text('@mike') .web-toggle input").isDisabled(), "web switch is off until web search is set up");
+  check(await page.locator(".member-row:has-text('@mike') .threads-toggle input").isDisabled(), "Threads switch is off until Threads is connected");
   await page.goto(APP + "#/admin");
   await page.waitForSelector("#tavily-key");
   await page.fill("#tavily-key", "wrong-key");
@@ -393,6 +419,68 @@ try {
   check(S.webCalls.length === 3, `at most 3 web calls per reply (${S.webCalls.length})`);
   const zuNow = calls.find((c) => c.name === "zu");
   check(!zuNow || !zuNow.body.tools.some((t) => t.function.name === "web_search"), "agents without web access don't get the tools");
+
+  // ---- Threads: connect in Admin, switch on for a member, agent searches + drafts, edit the draft, post it
+  await page.goto(APP + "#/admin");
+  await page.waitForSelector("#threads .pill:has-text('Off')");
+  check(await page.locator("#threads button:has-text('Connect Threads account')").isDisabled(), "Threads: connect waits for the app details");
+  check((await page.locator("#threads .copy-row code").innerText()).endsWith("/musab/threads/callback"), "Threads: redirect URL shown to copy");
+  await page.fill("#threads-app-id", "12ab");
+  await page.fill("#threads-secret", "abcdef0123456789abcdef0123456789");
+  await page.click("#threads button:has-text('Save')");
+  await page.waitForSelector("#threads .error:has-text('Threads app ID is a number')");
+  await page.fill("#threads-app-id", "1234567890123456");
+  await page.click("#threads button:has-text('Save')");
+  await page.waitForSelector("#threads .pill:has-text('Not connected')");
+  await ui("12-threads-setup", "#threads");
+  await page.click("#threads button:has-text('Connect Threads account')");
+  await page.waitForSelector("#threads .pill.ok:text-is('Connected')");
+  check((await text()).includes("Threads connected as @musab.creates") && page.url().endsWith("#/admin"), "Threads: back from sign-in, connected");
+  check(await page.evaluate(() => JSON.parse(localStorage.getItem("musab.serverSettings")).threads) === true, "Threads: agents can use it on this device");
+  await ui("13-threads-connected", "#threads");
+
+  await page.goto(APP + "#/team/it-ops");
+  await page.waitForSelector(".chat");
+  await page.click("[aria-label='Team info']");
+  await page.waitForSelector("dialog[open] .member-row:has-text('@mike')");
+  check(await page.locator(".member-row:has-text('@mike') .threads-toggle input").isEnabled(), "Threads switch is available once connected");
+  await page.click("text=Add a member");
+  await page.fill("#add-name", "sofi"); await page.fill("#add-role", "Threads writer"); await page.fill("#add-about", "Writes casual Threads posts.");
+  await page.click(".add-member button[type=submit]");
+  await page.waitForSelector("dialog[open] .member-row:has-text('@sofi')");
+  await page.click(".member-row:has-text('@sofi') .threads-toggle input");
+  await page.waitForFunction(() => [...document.querySelectorAll(".member-row")].find((r) => r.textContent.includes("@sofi"))?.querySelector(".threads-toggle input").checked);
+  await page.click(".sheet-body .close-sheet");
+  calls.length = 0;
+  await page.fill("textarea", "@sofi write a threads post about budget tips");
+  await page.click("button.send");
+  await page.waitForSelector(".draft .draft-post >> nth=1");
+  await page.waitForSelector("text=Draft is ready for you.");
+  const sofiFirst = calls.find((c) => c.name === "sofi");
+  check(sofiFirst.body.tools.some((t) => t.function.name === "threads_draft") && sofiFirst.body.messages[0].content.includes("## Threads"), "Threads agent gets the tools and instructions");
+  check(S.threadsCalls.some(([k, q, recent, a]) => k === "search" && q === "budget tips" && recent === true && a === "sofi"), "Threads search goes through the server");
+  check((await text()).includes("sofi searched Threads: “budget tips”"), "chat shows the Threads search");
+  check(calls.filter((c) => c.name === "sofi").some((c) => c.body.messages.some((m) => m.role === "tool" && /Draft not shown: Post 1 is 600 characters/.test(m.content))),
+    "a too-long draft is sent back to the agent to fix");
+  check(await page.locator(".draft").count() === 1 && (await page.locator(".draft").innerText()).includes("2/2"), "only the valid draft shows, as a 2-post thread");
+  check(!S.threadsCalls.some(([k]) => k === "publish"), "nothing is posted until the user taps Post");
+  await ui("14-threads-draft", ".draft");
+  await page.click(".draft button:has-text('Edit')");
+  await page.fill("dialog[open] textarea >> nth=0", "1/ Pay yourself first 💸");
+  await page.click("dialog[open] button:has-text('Save')");
+  await page.waitForSelector(".draft-post:has-text('Pay yourself first')");
+  check(true, "draft edited before posting");
+  await page.click(".draft button:has-text('Post to Threads')");
+  await page.waitForSelector(".draft-done:has-text('Posted to Threads')");
+  const pub = S.threadsCalls.find(([k]) => k === "publish");
+  check(JSON.stringify(pub?.[1]) === JSON.stringify(["1/ Pay yourself first 💸", "2/ Track every ringgit for 30 days."]) && pub[2] === "sofi", "the edited thread is posted");
+  check(await page.locator(".draft-done a").getAttribute("href") === "https://www.threads.com/@musab.creates/post/abc", "link to the post");
+  await page.reload();
+  await page.waitForSelector(".draft-done:has-text('Posted to Threads')");
+  check(await page.locator(".draft button:has-text('Post to Threads')").count() === 0, "posted state is saved");
+  await ui("15-threads-posted", ".draft");
+  const zuThreads = calls.find((c) => c.name === "zu");
+  check(!zuThreads || !zuThreads.body.tools.some((t) => t.function.name === "threads_draft"), "agents without Threads don't get the tools");
 
   // home list
   await page.goto(APP);

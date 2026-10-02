@@ -431,5 +431,27 @@ fieldset.talk legend { font-weight: 600; font-size: 15px; margin-bottom: 6px; pa
 details.write { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
 details.write summary { cursor: pointer; font-weight: 600; }
 
-.web-toggle { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.web-toggle, .threads-toggle { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
 .danger-text { color: var(--danger); }
+
+/* Threads: draft card in the chat, edit sheet, admin setup */
+.draft { display: grid; gap: 8px; min-width: min(300px, 70vw); }
+.draft-head { font-size: 13px; color: var(--muted); }
+.draft-post { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px 8px; }
+.draft-post p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.draft-post .count, .draft-edit .count { display: block; text-align: right; font-size: 11px; color: var(--muted); margin-top: 4px; }
+.count.over { color: var(--danger); font-weight: 600; }
+.draft-n { font-size: 11px; color: var(--muted); }
+.draft-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.draft-actions small { flex: 1 1 100%; }
+.draft-done { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 13px; color: var(--accent-soft-text); font-weight: 600; }
+.draft-edit { display: grid; gap: 14px; margin-bottom: 12px; }
+.draft-edit textarea { min-height: 110px; }
+.draft-edit-head { display: flex; justify-content: space-between; align-items: center; }
+details.setup-steps { margin: 12px 0; border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; }
+details.setup-steps summary { cursor: pointer; font-weight: 600; }
+details.setup-steps ol { margin: 10px 0 4px; padding-left: 20px; display: grid; gap: 8px; font-size: 14px; }
+.copy-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.copy-row code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; padding: 6px 8px; border-radius: 8px; background: var(--border); }
+.threads-account { display: grid; gap: 2px; margin: 10px 0; }
+#threads > .btn.block { margin-top: 12px; }

@@ -87,13 +87,13 @@ export const db = {
   },
 
   // ---------------------------------------------------------------- messages
-  /** Post to a team's bus. A message without a parent starts a new thread. */
-  async post(team, sender, recipients, content, parent = null) {
+  /** Post to a team's bus. A message without a parent starts a new thread. `extra` adds fields (e.g. a Threads draft). */
+  async post(team, sender, recipients, content, parent = null, extra = null) {
     const clean = [...new Set(recipients.map((r) => String(r).trim().toLowerCase()).filter(Boolean))].sort();
     const msg = {
       team, sender, recipients: clean.length ? clean : ["all"], content,
       parent_id: parent ? parent.id : null, thread_id: parent ? parent.thread_id : null,
-      hop: parent ? parent.hop + 1 : 0, created_at: Date.now() / 1000,
+      hop: parent ? parent.hop + 1 : 0, created_at: Date.now() / 1000, ...(extra || {}),
     };
     const d = await open();
     const t = d.transaction("messages", "readwrite");
@@ -102,6 +102,16 @@ export const db = {
     if (!parent) { msg.thread_id = msg.id; s.put(msg); }
     await finished(t);
     return msg;
+  },
+
+  /** Change fields of one saved message (e.g. a Threads draft after it's edited or posted). */
+  async updateMessage(id, patch) {
+    const t = (await open()).transaction("messages", "readwrite");
+    const s = t.objectStore("messages");
+    const m = await done(s.get(id));
+    if (m) s.put({ ...m, ...patch, id });
+    await finished(t);
+    return m ? { ...m, ...patch, id } : null;
   },
 
   async messagesAfter(team, after, limit = 200) {

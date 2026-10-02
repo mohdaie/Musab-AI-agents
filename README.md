@@ -60,6 +60,7 @@ Engineers stay in their own expertise and hand work to each other. Friends chat 
   - *Write your own*: name, one-line description, instructions.
   - *Give them to agents*: in a chat, tap the group name, then **Skills** under a member. Agents see each skill's name and description and open the full text with a `use_skill` tool only when it fits, so many skills stay cheap. The chat shows "📘 zu is using the skill …". Skills that ship scripts are flagged: agents can't run code, so they follow the written instructions only.
 - **Web search.** Paste a [Tavily](https://app.tavily.com) API key (free for 1,000 searches a month); the key stays on the server. Then in a chat tap the group name and switch on **Can browse the web** for the agents who need it. They get two read-only tools, `web_search` (up to 5 results) and `read_page` (one page as text), at most 3 calls per reply. The chat shows "🔎 mike searched the web: …" and "🌐 mike is reading …", and Usage counts searches and pages read.
+- **Threads.** Connect your own Threads account through your own Meta app (the setup steps are in the card): Threads app ID and secret, then **Connect Threads account**. The sign-in returns to the server's `/threads/callback`, which stores a 60-day token and renews it weekly while it's used. In a chat, switch on **Can use Threads** for a member. They get `threads_search` (keyword or topic tag, top or recent, at most 3 per reply) and `threads_draft`. A draft shows in the chat with **Edit** and **Post to Threads**; agents never post. Several posts become a thread, each post replying to the one before. Searching public posts needs Meta to approve `threads_keyword_search` (App Review); until then, search only finds your own posts. Posting works straight away.
 - **Login.** Change the username and password. Other devices then sign in again.
 
 ### Server
@@ -84,6 +85,7 @@ musab serve                 # then open http://localhost:8765
 npm i -g playwright && node tests/web/e2e.mjs                     # the app, with server and DeepSeek faked
 node --experimental-strip-types tests/server/github.test.mjs     # GitHub skill discovery, with GitHub faked
 node --experimental-strip-types tests/server/web.test.mjs        # web search and page reading, with Tavily faked
+node --experimental-strip-types tests/server/threads.test.mjs    # Threads sign-in, search and posting, with the Threads API faked
 ```
 
 This opens the app in a real browser with the server and DeepSeek faked, and goes through the forced password change, keys, settings, teams, chatting, models per team type, usage and members.
