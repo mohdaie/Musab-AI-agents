@@ -430,3 +430,6 @@ fieldset.talk legend { font-weight: 600; font-size: 15px; margin-bottom: 6px; pa
 .skill-body { width: 100%; min-height: 260px; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 details.write { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
 details.write summary { cursor: pointer; font-weight: 600; }
+
+.web-toggle { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.danger-text { color: var(--danger); }

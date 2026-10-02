@@ -80,7 +80,7 @@ async function dashboard(go, current, setCleanup) {
   }
   if (!current()) return;
   session.set(session.token(), state.mustChange);
-  session.cacheSettings(state.settings);
+  session.cacheSettings({ ...state.settings, webSearch: !!state.webSearch });
   const reload = () => { if (current()) dashboard(go, current, setCleanup); };
   const signOut = h("button", { class: "icon-btn", "aria-label": "Sign out", title: "Sign out", html: icon("logout"),
     onclick: () => { session.signOut(); go("#/"); toast("Signed out on this device"); } });
@@ -93,9 +93,10 @@ async function dashboard(go, current, setCleanup) {
   const keysCard = h("section", { class: "card" });
   const usageCard = h("section", { class: "card" });
   const skillsCard = h("section", { class: "card", id: "skills" });
+  const webCard = webSearchCard(state, reload);
   $app.replaceChildren(screen(bar,
     localKeysCard(reload),
-    keysCard, skillsCard, usageCard, settingsCard(state.settings),
+    keysCard, skillsCard, webCard, usageCard, settingsCard(state.settings),
     loginCard(false, state.username, reload),
     h("p", { class: "note" }, "Keys are stored on your server (Supabase) and only the server talks to DeepSeek, so keys never reach a phone. " +
       "Settings and usage are the same on every device you sign in on.")));
@@ -197,6 +198,35 @@ function fillKeyUsage(card, rows) {
       h("span", {}, h("span", { class: "muted" }, "Today "), `${t.requests} req · ${fmtN(t.input + t.output)} tokens · ${fmtCost(t.cost)}`),
       h("span", {}, h("span", { class: "muted" }, "30 days "), `${m.requests} req · ${fmtN(m.input + m.output)} tokens · ${fmtCost(m.cost)}`));
   }
+}
+
+// ------------------------------------------------------------------ web search
+function webSearchCard(state, reload) {
+  const key = h("input", { class: "input mono", id: "tavily-key", type: "password", autocomplete: "off", spellcheck: "false",
+    placeholder: state.webSearch ? "Saved. Paste a new key to replace" : "tvly-…" });
+  const err = h("p", { class: "error", hidden: true });
+  const save = h("button", { class: "btn primary", type: "submit" }, "Save");
+  return h("section", { class: "card", id: "web" },
+    h("div", { class: "card-head" }, h("h2", {}, "Web search"), h("span", { class: `pill ${state.webSearch ? "ok" : ""}` }, state.webSearch ? "On" : "Off")),
+    h("p", { class: "muted small" }, "Lets agents you choose search the web and read pages for current or exact facts. Read-only: they can't post or change anything. Uses ",
+      h("a", { href: "https://app.tavily.com", target: "_blank", rel: "noopener" }, "Tavily"), ": free for 1,000 searches a month, no card needed."),
+    h("form", { onsubmit: async (e) => {
+      e.preventDefault();
+      err.hidden = true; save.disabled = true; save.textContent = "Checking…";
+      try {
+        const r = await api("/web-key", { method: "POST", body: { key: key.value.trim() } });
+        toast(r.webSearch ? "Web search is on. Turn it on per agent in the team sheet." : "Web search key removed");
+        reload();
+      } catch (ex) { err.textContent = ex.message; err.hidden = false; save.disabled = false; save.textContent = "Save"; }
+    } },
+      h("div", { class: "field" }, h("label", { for: "tavily-key" }, "Tavily API key"), h("div", { class: "input-group" }, key, save)),
+      err,
+      state.webSearch ? h("button", { type: "button", class: "link-btn small danger-text", onclick: async () => {
+        if (!confirm("Remove the Tavily key? Agents stop browsing the web.")) return;
+        try { await api("/web-key", { method: "POST", body: { key: "" } }); toast("Web search turned off"); reload(); } catch (e) { toast(e.message); }
+      } }, "Remove key") : null),
+    h("p", { class: "muted small" }, "Then in a chat: tap the group name and switch on ", h("strong", {}, "Can browse the web"),
+      " for the agents who need it. Each agent can do at most 3 searches or page reads per reply. Every search shows in the chat, and Usage counts them."));
 }
 
 // ------------------------------------------------------------------ skills
@@ -366,7 +396,7 @@ async function renderUsage(card, state) {
     dailyChart(all),
     rows.length ? null : h("p", { class: "muted" }, "No requests in this period yet."),
     table("By API key", groupBy(rows, "keyId"), (k) => keys[k] || "Removed key", true),
-    table("By model", groupBy(rows, "model"), (k) => (MODELS[k] || k).replace(/ \(.*\)$/, ""), false),
+    table("By model", groupBy(rows, "model"), (k) => ({ "web-search": "Web searches", "web-read": "Pages read" }[k] || (MODELS[k] || k).replace(/ \(.*\)$/, "")), false),
     table("By agent", groupBy(rows, "agent"), (k) => (k ? `@${k}` : "Other"), false),
     h("p", { class: "muted small" }, "Counted by the server for every device. Cost is estimated from DeepSeek's published prices, including peak and off-peak rates; your real balance is shown on each key."),
     h("button", { class: "link-btn small", onclick: async () => {
@@ -412,7 +442,12 @@ function dailyChart(rows) {
 // ------------------------------------------------------------------ settings
 function settingsCard(s) {
   const save = async (patch) => {
-    try { const next = await api("/settings", { method: "POST", body: patch }); Object.assign(s, next); session.cacheSettings(next); toast("Saved"); }
+    try {
+      const next = await api("/settings", { method: "POST", body: patch });
+      Object.assign(s, next);
+      session.cacheSettings({ ...next, webSearch: session.settings().webSearch }); // not part of /settings
+      toast("Saved");
+    }
     catch (e) { toast(e.message); }
   };
   const modelSelect = (style, id) => h("select", { class: "input", id, onchange: (e) => save({ models: { ...s.models, [style]: e.target.value } }) },

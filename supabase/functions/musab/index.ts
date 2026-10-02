@@ -3,6 +3,7 @@
 // Tables (RLS on, no policies) are only reachable with the service role this function runs with.
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { discover, fetchSkill, GitHubError, parseSkillMd } from "./github.ts";
+import { read as readPage, search as webSearch, WebError } from "./web.ts";
 
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
   auth: { persistSession: false },
@@ -205,7 +206,8 @@ async function route(req: Request): Promise<Response> {
     throw new HttpError(403, "Change the default password first.");
 
   if (m === "POST" && path === "/chat") return json(req, 200, await chat(req, cfg));
-  if (m === "GET" && path === "/me") return json(req, 200, { username: cfg.username, mustChange: cfg.must_change, settings: cfg.settings });
+  if (m === "GET" && path === "/me") return json(req, 200, { username: cfg.username, mustChange: cfg.must_change,
+    settings: { ...cfg.settings, webSearch: !!cfg.tavily_key } });
 
   if (m === "POST" && path === "/login/change") {
     const { username = "", password = "" } = await req.json();
@@ -220,7 +222,35 @@ async function route(req: Request): Promise<Response> {
   if (m === "GET" && path === "/admin") {
     const { data } = await sb.from("api_keys").select("*").order("created_at");
     return json(req, 200, { username: cfg.username, mustChange: cfg.must_change, settings: cfg.settings,
-      keys: (data || []).map(publicKey), githubToken: !!cfg.github_token });
+      keys: (data || []).map(publicKey), githubToken: !!cfg.github_token, webSearch: !!cfg.tavily_key });
+  }
+
+  // ---------------------------------------------------------------- web search (Tavily)
+  if (m === "POST" && path === "/web-key") {
+    const { key = "" } = await req.json();
+    const k = String(key).trim();
+    if (k) {
+      if (!/^tvly-[\w-]{10,}$/.test(k)) throw new HttpError(400, "That doesn't look like a Tavily key (it starts with tvly-).");
+      try { await webSearch(k, "test"); } catch (e) { throw new HttpError(400, (e as Error).message); } // one credit, proves the key works
+    }
+    await sb.from("app_config").update({ tavily_key: k || null }).eq("id", 1);
+    return json(req, 200, { webSearch: !!k });
+  }
+  if (m === "POST" && (path === "/web/search" || path === "/web/read")) {
+    if (!cfg.tavily_key) throw new HttpError(409, "Web search isn't set up. Add a Tavily key in Admin → Web search.");
+    const b = await req.json();
+    const meta = { team: String(b.meta?.team || "").slice(0, 80), agent: String(b.meta?.agent || "").slice(0, 40) };
+    const t0 = Date.now();
+    const kind = path === "/web/search" ? "web-search" : "web-read";
+    try {
+      const out = kind === "web-search" ? { results: await webSearch(cfg.tavily_key, b.query) } : await readPage(cfg.tavily_key, b.url);
+      await sb.from("usage").insert({ model: kind, ...meta, ok: true, status: 200, ms: Date.now() - t0 });
+      return json(req, 200, out);
+    } catch (e) {
+      await sb.from("usage").insert({ model: kind, ...meta, ok: false, status: 400, ms: Date.now() - t0, error: String((e as Error).message).slice(0, 200) });
+      if (e instanceof WebError) throw new HttpError(400, e.message);
+      throw e;
+    }
   }
   if (m === "POST" && path === "/github-token") {
     const { token = "" } = await req.json();

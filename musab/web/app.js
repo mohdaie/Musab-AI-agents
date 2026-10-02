@@ -3,7 +3,7 @@
    usage are on the server, which also relays the agents' DeepSeek requests (server.js). */
 import { adminView } from "./admin.js";
 import { db } from "./db.js";
-import { Engine, TALK, TALK_LEVELS, addMember, createTeam, removeMember, setAgentSkills, setAgentTalk } from "./engine.js";
+import { Engine, TALK, TALK_LEVELS, addMember, createTeam, removeMember, setAgentSkills, setAgentTalk, setAgentWeb } from "./engine.js";
 import { session, skills, syncSettings, syncSkills } from "./server.js";
 import { $app, $banner, $sheet, appbar, avatar, colorFor, fmtTime, groupAvatar, h, icon, richText, toast } from "./ui.js";
 
@@ -135,6 +135,19 @@ function skillsPicker(team, a) {
   };
   view();
   return box;
+}
+
+/** "Can browse the web" switch for one member (needs a Tavily key in Admin → Web search). */
+function webToggle(team, a) {
+  const ready = !!session.settings().webSearch;
+  return h("label", { class: "switch web-toggle" },
+    h("span", {}, h("strong", {}, "Can browse the web"),
+      h("span", { class: "hint" }, ready ? "Search and read pages when it needs current facts." : "Set up web search in Admin first.")),
+    h("input", { type: "checkbox", checked: !!a.web, disabled: !ready && !a.web, "aria-label": `@${a.name} can browse the web`,
+      onchange: async (e) => {
+        try { await setAgentWeb(team.id, a.name, e.target.checked); a.web = e.target.checked; toast(`@${a.name}: web ${a.web ? "on" : "off"}`); }
+        catch (ex) { e.target.checked = !e.target.checked; toast(ex.message); }
+      } }));
 }
 
 const defaultLevel = () => (TALK[session.settings().talk] ? session.settings().talk : "balanced");
@@ -496,7 +509,8 @@ function drawTeamSheet(team) {
           try { await setAgentTalk(team.id, a.name, k); a.talk = k; toast(`@${a.name}: ${TALK[k].label}`); return true; }
           catch (e) { toast(e.message); return false; }
         }, `How much @${a.name} talks`),
-        skillsPicker(team, a)),
+        skillsPicker(team, a),
+        webToggle(team, a)),
       h("button", { class: "btn small danger", "aria-label": `Remove ${a.name}`, disabled: team.agents.length <= 1,
         title: team.agents.length <= 1 ? "A team needs at least one member" : "", onclick: async () => {
           if (!confirm(`Remove @${a.name} from “${team.name}”? Their own memory is deleted; their old messages stay in the chat.`)) return;
