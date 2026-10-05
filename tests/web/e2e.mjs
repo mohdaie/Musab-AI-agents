@@ -197,8 +197,13 @@ async function fakeServer(route) {
 }
 
 // ---------------------------------------------------------------- run
+// The folder picker can't be clicked through in a test: "picking" returns a folder in the origin-private file system.
+const fakeFolderPicker = () => {
+  window.showDirectoryPicker = async () => (await navigator.storage.getDirectory()).getDirectoryHandle("picked", { create: true });
+};
 const browser = await pw.chromium.launch();
-const ctx = await browser.newContext({ ...pw.devices["Pixel 7"] });
+const ctx = await browser.newContext({ ...pw.devices["Pixel 7"], acceptDownloads: true });
+await ctx.addInitScript(fakeFolderPicker);
 await ctx.route("https://*.supabase.co/functions/v1/musab/**", fakeServer);
 await ctx.route("https://api.deepseek.com/**", (r) => r.abort()); // the app must never call DeepSeek directly
 const page = await ctx.newPage();
@@ -490,6 +495,102 @@ try {
   check(await page.locator(".chat-row").count() === 1 && (await page.locator(".chat-row").innerText()).includes("The Squad"), "Friends filter");
   await page.click(".filters button:has-text('All')");
   await shot("06-home");
+
+  // ---- backup: the "folder" the user picks is a folder in the origin-private file system (like Android Chrome)
+  check(await page.locator(".backup-notice:has-text('only saved in this browser')").count() === 1, "home warns when there's no backup");
+  await page.click("[aria-label=Backup]");
+  await page.click("button:has-text('Choose folder')");
+  await page.waitForSelector(".pill:has-text('Auto-saving')");
+  const folderFiles = () => page.evaluate(async () => {
+    const d = await (await navigator.storage.getDirectory()).getDirectoryHandle("picked");
+    const out = {};
+    for await (const [name, f] of d.entries()) out[name] = await (await f.getFile()).text();
+    return out;
+  });
+  let files = await folderFiles();
+  let saved = JSON.parse(files["musab-backup.json"] || "{}");
+  check(saved.teams?.length === 2 && saved.messages.some((m) => m.content.includes("Ramen at Jalan Alor")) && saved.memories.length > 0,
+    "choosing a folder saves teams, chats and memory there");
+  check(Object.keys(files).some((n) => /^musab-backup-\d{4}-\d{2}-\d{2}\.json$/.test(n)), "a dated daily copy is kept too");
+  await ui("16-backup", ".content");
+  await page.goto(APP + "#/team/the-squad");
+  await page.fill("textarea", "@amir backup check");
+  await page.click("button.send");
+  await page.waitForTimeout(3500);
+  saved = JSON.parse((await folderFiles())["musab-backup.json"]);
+  check(saved.messages.some((m) => m.content === "backup check"), "a new message is saved to the folder automatically");
+  await page.goto(APP);
+  await page.waitForSelector(".chat-row");
+  check(await page.locator(".backup-notice").count() === 0, "no backup warning once a folder is set");
+  await page.click("[aria-label=Backup]");
+  const [dl] = await Promise.all([page.waitForEvent("download"), page.click("button:has-text('Save file')")]);
+  const backupFile = await dl.path();
+  check(/^musab-backup-\d{4}-\d{2}-\d{2}\.json$/.test(dl.suggestedFilename()), `backup file download (${dl.suggestedFilename()})`);
+  const backupText = (await import("node:fs")).readFileSync(backupFile, "utf8");
+
+  // The browser wiped this device: a new phone with the same folder chosen again gets everything back.
+  {
+    const c2 = await browser.newContext({ ...pw.devices["Pixel 7"] });
+    await c2.addInitScript(fakeFolderPicker);
+    await c2.route("https://*.supabase.co/functions/v1/musab/**", fakeServer);
+    const p2 = await c2.newPage();
+    p2.on("pageerror", (e) => errors.push(String(e)));
+    await p2.goto(APP);
+    await p2.waitForSelector(".hero");
+    await p2.evaluate(async (text) => {
+      const d = await (await navigator.storage.getDirectory()).getDirectoryHandle("picked", { create: true });
+      const w = await (await d.getFileHandle("musab-backup.json", { create: true })).createWritable();
+      await w.write(text); await w.close();
+    }, backupText);
+    await p2.click("button:has-text('Restore from a backup')");
+    await p2.click("button:has-text('Choose folder')");
+    await p2.waitForSelector(".chat-row");
+    check(await p2.locator(".chat-row").count() === 2, "empty device: choosing the folder restores every team");
+    await p2.click(".chat-row:has-text('The Squad')");
+    await p2.waitForSelector("text=Ramen at Jalan Alor");
+    check(true, "restored chat history shows");
+    await c2.close();
+  }
+
+  // iPhone / Firefox: no folder picker. An older version of the app (database v1) already has a team on this device.
+  {
+    const c3 = await browser.newContext({ ...pw.devices["Pixel 7"] });
+    await c3.addInitScript(() => { window.showDirectoryPicker = undefined; });
+    await c3.route("https://*.supabase.co/functions/v1/musab/**", fakeServer);
+    await c3.route(`${APP}blank`, (r) => r.fulfill({ contentType: "text/html", body: "<!doctype html><title>blank</title>" }));
+    const p3 = await c3.newPage();
+    p3.on("pageerror", (e) => errors.push(String(e)));
+    p3.on("dialog", (d) => d.accept());
+    await p3.goto(`${APP}blank`);
+    await p3.evaluate(() => new Promise((resolve, reject) => {
+      const r = indexedDB.open("musab", 1);
+      r.onupgradeneeded = () => {
+        const d = r.result;
+        d.createObjectStore("teams", { keyPath: "id" });
+        const m = d.createObjectStore("messages", { keyPath: "id", autoIncrement: true });
+        m.createIndex("team_id", ["team", "id"]); m.createIndex("thread", ["team", "thread_id", "id"]);
+        d.createObjectStore("memories", { keyPath: "id", autoIncrement: true }).createIndex("team", "team");
+        d.createObjectStore("usage", { keyPath: "id", autoIncrement: true }).createIndex("ts", "ts");
+        r.transaction.objectStore("teams").put({ id: "old-team", name: "Old Team", style: "work", created_at: 1, agents: [{ name: "zu", role: "Admin" }] });
+      };
+      r.onsuccess = () => { r.result.close(); resolve(); };
+      r.onerror = () => reject(r.error);
+    }));
+    await p3.goto(APP);
+    await p3.waitForSelector(".chat-row:has-text('Old Team')");
+    check(true, "teams from the older database version are kept after the update");
+    await p3.click("[aria-label=Backup]");
+    await p3.waitForSelector(".card:has-text('Backup file')");
+    check((await p3.locator("body").innerText()).includes("can't save to a folder"), "no folder picker: the page says to save a backup file");
+    await p3.setInputFiles("input[type=file]", backupFile);
+    await p3.waitForSelector(".chat-row:has-text('The Squad')");
+    check(await p3.locator(".chat-row").count() === 2, "restore from file replaces this device's teams");
+    await p3.click("[aria-label=Backup]");
+    await p3.setInputFiles("input[type=file]", { name: "x.json", mimeType: "application/json", buffer: Buffer.from('{"hello":1}') });
+    await p3.waitForSelector("#toast:has-text(\"isn't a Musab backup\")");
+    check(true, "a file that isn't a backup is refused");
+    await c3.close();
+  }
 
   // usage in admin
   await page.goto(APP + "#/admin");

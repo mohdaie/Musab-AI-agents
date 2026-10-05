@@ -1,6 +1,6 @@
 /* App shell cache. DeepSeek requests (other origin) are never touched. */
-const CACHE = "musab-v11";
-const SHELL = ["./", "index.html", "style.css", "app.js", "ui.js", "db.js", "engine.js", "admin.js", "server.js",
+const CACHE = "musab-v12";
+const SHELL = ["./", "index.html", "style.css", "app.js", "ui.js", "db.js", "engine.js", "admin.js", "server.js", "backup.js",
   "manifest.webmanifest", "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", (e) => {

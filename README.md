@@ -40,13 +40,23 @@ You can override the model per agent with `model:` in its YAML, so you can mix t
 
 Link: https://mohdaie.github.io/Musab-AI-agents/. Open it on your phone and install it: iPhone *Share → Add to Home Screen*, Android Chrome *Install app*.
 
-The app looks and works like a WhatsApp group chat (dark and light). Your teams, chats and agent memory are saved on your device. The admin login, DeepSeek API keys, settings and usage are on a small server (a Supabase Edge Function), so they're the same on every device and survive app updates, and the keys never reach a phone.
+The app looks and works like a WhatsApp group chat (dark and light). Your teams, chats and agent memory are saved on your device, with a backup in a folder you choose (see Backup below). The admin login, DeepSeek API keys, settings and usage are on a small server (a Supabase Edge Function), so they're the same on every device and survive app updates, and the keys never reach a phone.
 
 1. **Admin** (shield icon). Sign in with **admin / admin**; the server makes you set your own username and password before anything else. Add your DeepSeek API key.
 2. **New team** (green + button): a name, *Team of engineers* or *Group of friends*, how many agents (1 to 12), then a name, designation and expertise or personality for each.
 3. **Chat**: a message goes to the group; type `@` to pick one member. "jess is typing…" shows under the group name. Tap the group name to add or remove members, clear the chat or delete the team.
 
 Engineers stay in their own expertise and hand work to each other. Friends chat casually and stay in character.
+
+### Backup (folder you choose)
+
+Teams, chats and agent memory live in the browser, and a browser can clear that storage by itself (low disk space, a "clear site data" setting, Safari after 7 days without use). Open **Backup** (folder icon on the home screen) to keep a copy outside the browser:
+
+- **PC and Android** (Chrome, Edge, Samsung Internet): tap **Choose folder** and pick any folder, for example Documents or a OneDrive/Google Drive folder. Every change is then saved there as `musab-backup.json`, plus one dated copy per day (the last 7 are kept). If the browser wipes the app, choose the same folder again and everything comes back. After a restart the browser may ask once more; the home screen then shows **Allow**.
+- **iPhone, iPad and Firefox** can't give a web app a folder. Tap **Save file** and save it to Files, iCloud Drive or Google Drive; **Restore** opens it again. The home screen reminds you when your last backup is more than 7 days old.
+- A backup file also moves your teams to another device: save it on one, restore it on the other.
+
+Admin login, keys, skills, settings and usage are on the server, so they aren't part of the backup.
 
 ### Admin page
 
@@ -86,7 +96,7 @@ node --experimental-strip-types tests/server/web.test.mjs        # web search an
 node --experimental-strip-types tests/server/threads.test.mjs    # Threads sign-in, search and posting, with the Threads API faked
 ```
 
-This opens the app in a real browser with the server and DeepSeek faked, and goes through the forced password change, keys, settings, teams, chatting, models per team type, talk levels, skills, web search, Threads drafts and posting, usage and members.
+This opens the app in a real browser with the server and DeepSeek faked, and goes through the forced password change, keys, settings, teams, chatting, models per team type, talk levels, skills, web search, Threads drafts and posting, backup to a folder and restore, usage and members.
 
 ## Use (command line)
 

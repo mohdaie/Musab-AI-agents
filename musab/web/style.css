@@ -455,3 +455,14 @@ details.setup-steps ol { margin: 10px 0 4px; padding-left: 20px; display: grid; 
 .copy-row code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; padding: 6px 8px; border-radius: 8px; background: var(--border); }
 .threads-account { display: grid; gap: 2px; margin: 10px 0; }
 #threads > .btn.block { margin-top: 12px; }
+
+/* ---------- backup ---------- */
+.backup-notice { display: flex; align-items: center; gap: 12px; margin: 8px 12px 4px; padding: 10px 12px; border-radius: 12px;
+  background: var(--warn-bg); color: var(--warn-text); font-size: 14px; }
+.backup-notice span { flex: 1; min-width: 0; }
+.backup-notice .btn { flex-shrink: 0; }
+.backup-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0 0 14px; font-size: 14px; }
+.backup-facts dt { color: var(--muted); }
+.backup-facts dd { margin: 0; overflow-wrap: anywhere; }
+.card > .btn.block { margin-bottom: 4px; }
+.hero .restore-link { margin-top: 16px; }
