@@ -78,6 +78,8 @@ ICONS.more = '<circle cx="12" cy="5" r="1.6" fill="currentColor"/><circle cx="12
 ICONS.group = '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><circle cx="17" cy="9" r="2.6"/><path d="M16.5 14.6c2.7.2 4.4 1.9 5 4.9"/>';
 ICONS.mic = '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/>';
 ICONS.check2 = '<path d="M2 13l4 4 8-9M10 15l2 2 8-9"/>';
+ICONS.folder = '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>';
+ICONS.download = '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>';
 
 /** WhatsApp-style top bar: back arrow, optional avatar, title (+ subtitle), action buttons. */
 export function appbar({ title, subtitle = null, back = null, avatarEl = null, onTitle = null, actions = [], cls = "" }) {

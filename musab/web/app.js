@@ -1,7 +1,9 @@
 /* Musab Agents PWA: create a team of agents, then chat with them. No framework.
-   Teams, chats and agent memory are stored on this device; the admin login, API keys, settings and
-   usage are on the server, which also relays the agents' DeepSeek requests (server.js). */
+   Teams, chats and agent memory are stored on this device (and backed up to a folder or file, backup.js);
+   the admin login, API keys, settings and usage are on the server, which also relays the agents'
+   DeepSeek requests (server.js). */
 import { adminView } from "./admin.js";
+import { backupNotice, backupView } from "./backup.js";
 import { db } from "./db.js";
 import { Engine, TALK, TALK_LEVELS, THREADS_MAX_CHARS, addMember, createTeam, draftProblem, postDraft, removeMember,
   setAgentSkills, setAgentTalk, setAgentThreads, setAgentWeb, threadsLength } from "./engine.js";
@@ -38,6 +40,7 @@ function route() {
   window.scrollTo(0, 0);
   const [, view, id] = location.hash.split("/");
   if (view === "new") return wizard.start();
+  if (view === "backup") return backupView({ go, current });
   if (view === "admin") return adminView({ go, current, setCleanup: (fn) => { if (current()) cleanup = fn; else fn(); } });
   if (view === "team" && id) return chatView(decodeURIComponent(id), current);
   return homeView(current);
@@ -54,15 +57,18 @@ async function homeView(current) {
       h("button", { class: "btn", onclick: route }, "Try again")));
     return;
   }
+  const notice = await backupNotice(go).catch(() => null);
   if (!current()) return;
   const adminBtn = h("button", { class: "icon-btn", "aria-label": "Admin", title: "Admin", html: icon("admin"), onclick: () => go("#/admin") });
-  const body = h("div", { class: "content list" });
+  const backupBtn = h("button", { class: "icon-btn", "aria-label": "Backup", title: "Backup", html: icon("folder"), onclick: () => go("#/backup") });
+  const body = h("div", { class: "content list" }, notice);
   if (!teams.length) {
     body.append(h("div", { class: "hero" },
       h("img", { class: "logo", src: "icons/icon-192.png", alt: "" }),
       h("h2", {}, "Build your AI team"),
       h("p", {}, "Pick how many agents you want, give each one a designation and what they're good at, then chat with all of them in one group. Make it a team of engineers or a group of friends."),
-      h("button", { class: "btn primary", onclick: () => go("#/new"), html: `${icon("plus")} Create a team` })));
+      h("button", { class: "btn primary", onclick: () => go("#/new"), html: `${icon("plus")} Create a team` }),
+      h("p", {}, h("button", { class: "link-btn restore-link", onclick: () => go("#/backup") }, "Restore from a backup"))));
   } else {
     const list = h("ul", { class: "chat-list" });
     const draw = (filter) => {
@@ -88,7 +94,7 @@ async function homeView(current) {
     body.append(h("div", { class: "filters" }, chips), list);
   }
   $app.replaceChildren(h("div", { class: "screen" },
-    appbar({ title: "Musab Agents", actions: [adminBtn], cls: "home" }),
+    appbar({ title: "Musab Agents", actions: [backupBtn, adminBtn], cls: "home" }),
     body,
     h("button", { class: "fab", "aria-label": "New team", title: "New team", html: icon("plus"), onclick: () => go("#/new") })));
 }

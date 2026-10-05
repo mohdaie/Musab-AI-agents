@@ -1,17 +1,23 @@
-/* On-device storage (IndexedDB "musab"): teams, messages (the bus) and agent memories.
+/* On-device storage (IndexedDB "musab"): teams, messages (the bus) and agent memories, plus "meta"
+   for this device's own state (the backup folder, see backup.js).
    Admin login, API keys, settings and usage live on the server (see server.js).
-   The old "usage" store from earlier versions is left in place but no longer used. */
+   The old "usage" store from earlier versions is left in place but no longer used.
+   Every write fires a "musab-data" event on window so backup.js can save a copy. */
 
 const DB_NAME = "musab";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+const DATA = ["teams", "messages", "memories"]; // what a backup holds
 let dbPromise = null;
+const changed = () => window.dispatchEvent(new Event("musab-data"));
 
 function open() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
       const r = indexedDB.open(DB_NAME, DB_VERSION);
-      r.onupgradeneeded = () => {
+      r.onupgradeneeded = (e) => {
         const d = r.result;
+        if (e.oldVersion < 2) d.createObjectStore("meta");
+        if (e.oldVersion >= 1) return;
         d.createObjectStore("teams", { keyPath: "id" });
         const m = d.createObjectStore("messages", { keyPath: "id", autoIncrement: true });
         m.createIndex("team_id", ["team", "id"]);
@@ -68,7 +74,7 @@ function deleteWhere(index, range) {
 export const db = {
   async teams() { return done((await store("teams")).getAll()); },
   async team(id) { return done((await store("teams")).get(id)); },
-  async saveTeam(team) { return done((await store("teams", "readwrite")).put(team)); },
+  async saveTeam(team) { const r = await done((await store("teams", "readwrite")).put(team)); changed(); return r; },
 
   async deleteTeam(id) {
     const d = await open();
@@ -77,6 +83,7 @@ export const db = {
     deleteWhere(t.objectStore("messages").index("team_id"), IDBKeyRange.bound([id, 0], [id, Infinity]));
     deleteWhere(t.objectStore("memories").index("team"), IDBKeyRange.only(id));
     await finished(t);
+    changed();
   },
 
   /** Clear a team's chat. Members and their memory stay. */
@@ -84,6 +91,7 @@ export const db = {
     const t = (await open()).transaction("messages", "readwrite");
     deleteWhere(t.objectStore("messages").index("team_id"), IDBKeyRange.bound([id, 0], [id, Infinity]));
     await finished(t);
+    changed();
   },
 
   // ---------------------------------------------------------------- messages
@@ -101,6 +109,7 @@ export const db = {
     msg.id = await done(s.add(msg));
     if (!parent) { msg.thread_id = msg.id; s.put(msg); }
     await finished(t);
+    changed();
     return msg;
   },
 
@@ -111,6 +120,7 @@ export const db = {
     const m = await done(s.get(id));
     if (m) s.put({ ...m, ...patch, id });
     await finished(t);
+    changed();
     return m ? { ...m, ...patch, id } : null;
   },
 
@@ -141,6 +151,7 @@ export const db = {
   async remember(team, owner, content) {
     const m = { team, owner, content: String(content).trim(), created_at: Date.now() / 1000 };
     m.id = await done((await store("memories", "readwrite")).add(m));
+    changed();
     return m;
   },
   /** Delete one member's private memories (team memory stays). */
@@ -150,13 +161,40 @@ export const db = {
     const r = s.index("team").openCursor(IDBKeyRange.only(team));
     r.onsuccess = () => { const c = r.result; if (c) { if (c.value.owner === owner) c.delete(); c.continue(); } };
     await finished(t);
+    changed();
   },
   async forget(team, owners, id) {
     const s = await store("memories", "readwrite");
     const m = await done(s.get(Number(id)));
     if (!m || m.team !== team || !owners.includes(m.owner)) return false;
     await done(s.delete(Number(id)));
+    changed();
     return true;
   },
 
+  // ---------------------------------------------------------------- whole-device copy (backup.js)
+  /** Every team, message and memory on this device. */
+  async dump() {
+    const t = (await open()).transaction(DATA);
+    const [teams, messages, memories] = await Promise.all(DATA.map((n) => done(t.objectStore(n).getAll())));
+    return { teams, messages, memories };
+  },
+  /** Replace every team, message and memory on this device with `data` (from dump()). */
+  async load(data) {
+    const t = (await open()).transaction(DATA, "readwrite");
+    for (const n of DATA) {
+      const s = t.objectStore(n);
+      s.clear();
+      for (const row of data[n]) s.put(row);
+    }
+    await finished(t);
+    changed();
+  },
+
+  // ---------------------------------------------------------------- this device's own state
+  async meta(key) { return done((await store("meta")).get(key)); },
+  async setMeta(key, value) {
+    const s = await store("meta", "readwrite");
+    return done(value === undefined ? s.delete(key) : s.put(value, key));
+  },
 };
